@@ -1,0 +1,164 @@
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { lockCircle, withTx } from '../db.js';
+import { badRequest, conflict, forbidden, notFound } from '../errors.js';
+import { parse, requireAdmin, requireTrusted } from '../http.js';
+import { refreshSpamForUser } from '../lookup.js';
+import { normalizePhone, requirePhone } from '../phone.js';
+import { vault } from '../vault.js';
+import { newInviteCode } from '../tokens.js';
+import { assertKeepsAnAdmin, getUser, toUser, USER_SELECT, UUID_RE, type UserRow } from '../users.js';
+import { deleteMember } from './me.js';
+
+const PatchMember = z.object({
+  watched: z.boolean().optional(),
+  isAdmin: z.boolean().optional(),
+});
+
+const InviteBody = z.object({
+  expiresInHours: z.number().int().min(1).max(24 * 30).optional().default(72),
+  // Binds the code to this phone; required to re-register an existing member.
+  phone: z.string().nullish(),
+});
+
+const MAX_CONTACTS = 20_000;
+const ContactsBody = z.object({
+  contacts: z.array(z.object({ phone: z.string(), name: z.string() })),
+});
+
+export async function circleRoutes(app: FastifyInstance) {
+  const { cfg, pool } = app.ctx;
+
+  app.get('/members', async (req) => {
+    requireTrusted(req); // open sign-ups never see the member roster
+    // Only family (trusted) are members; open sign-ups are not listed.
+    const { rows } = await pool.query<UserRow>(`${USER_SELECT} WHERE u.trusted ORDER BY u.is_admin DESC, lower(u.name)`);
+    return { members: rows.map(toUser) };
+  });
+
+  app.patch<{ Params: { id: string } }>('/members/:id', async (req) => {
+    requireAdmin(req);
+    const b = parse(PatchMember, req.body);
+    const id = req.params.id;
+    if (!UUID_RE.test(id)) throw notFound('Member not found');
+    await withTx(pool, async (c) => {
+      await lockCircle(c);
+      const target = (await c.query<UserRow>('SELECT * FROM users WHERE id = $1', [id])).rows[0];
+      if (!target) throw notFound('Member not found');
+      if (b.isAdmin === false) await assertKeepsAnAdmin(c, { demoting: id });
+      await c.query(
+        `UPDATE users SET watched = coalesce($2, watched), is_admin = coalesce($3, is_admin),
+           trusted = trusted OR coalesce($3, false) WHERE id = $1`,
+        [id, b.watched ?? null, b.isAdmin ?? null],
+      );
+      // Admin reports count as likely_scam, so a role change can flip labels.
+      if (b.isAdmin !== undefined && b.isAdmin !== target.is_admin) {
+        await refreshSpamForUser(c, id, cfg.spamThreshold);
+      }
+    });
+    return toUser((await getUser(pool, id))!);
+  });
+
+  app.delete<{ Params: { id: string } }>('/members/:id', async (req, reply) => {
+    requireAdmin(req);
+    const id = req.params.id;
+    if (!UUID_RE.test(id)) throw notFound('Member not found');
+    await deleteMember(pool, id, cfg.spamThreshold);
+    return reply.status(204).send();
+  });
+
+  // Non-admins may send up to this many plain invites (outstanding + already used).
+  const MEMBER_INVITE_LIMIT = 5;
+
+  app.post('/invites', async (req, reply) => {
+    const b = parse(InviteBody, req.body);
+    const phone = b.phone ? requirePhone(b.phone, cfg.defaultRegion) : null;
+    // Phone-bound (device-reset) codes stay admin-only; open sign-ups can't invite at all.
+    if (!req.user.is_admin && (phone || !req.user.trusted)) throw forbidden();
+    const result = await withTx(pool, async (c) => {
+      if (!req.user.is_admin) {
+        // Lock so concurrent invites can't each read < limit and all insert.
+        await lockCircle(c);
+        const { rows } = await c.query<{ n: string }>(
+          `SELECT count(*)::text AS n FROM invites
+           WHERE created_by = $1 AND phone IS NULL AND (used_by IS NOT NULL OR expires_at > now())`,
+          [req.user.id],
+        );
+        if (Number(rows[0].n) >= MEMBER_INVITE_LIMIT) {
+          throw conflict('invite_limit', `You can invite up to ${MEMBER_INVITE_LIMIT} people. Ask an admin to add more.`);
+        }
+      }
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const code = newInviteCode();
+        const { rows } = await c.query<{ expires_at: Date }>(
+          `INSERT INTO invites (code, created_by, expires_at, phone)
+           VALUES ($1, $2, now() + make_interval(hours => $3), $4)
+           ON CONFLICT (code) DO NOTHING RETURNING expires_at`,
+          [code, req.user.id, b.expiresInHours, phone],
+        );
+        if (rows[0]) return { code, expiresAt: rows[0].expires_at.toISOString(), phone };
+      }
+      throw new Error('could not generate a unique invite code');
+    });
+    return reply.status(201).send(result);
+  });
+
+  app.get('/stats', async (req) => {
+    requireTrusted(req);
+    const userPhones = (await pool.query<{ phone: string }>('SELECT phone FROM users')).rows;
+    const { rows } = await pool.query<{ members: number; known: number; blocked: number }>(
+      `SELECT
+         (SELECT count(*) FROM users) AS members,
+         (SELECT count(*) FROM (SELECT phone_hash FROM contacts UNION SELECT phone_hash FROM name_suggestions
+                                UNION SELECT unnest($1::bytea[])) k) AS known,
+         (SELECT count(*) FROM events WHERE type = 'spam_call') AS blocked`,
+      [userPhones.map((u) => vault().index(u.phone))],
+    );
+    return { members: rows[0].members, knownNumbers: rows[0].known, spamBlocked: rows[0].blocked };
+  });
+
+  app.post('/contacts/sync', async (req) => {
+    requireTrusted(req); // only family contributes names to the shared database
+    const raw = req.body as { contacts?: unknown } | undefined;
+    if (Array.isArray(raw?.contacts) && raw.contacts.length > MAX_CONTACTS) {
+      throw badRequest('too_many_contacts', `At most ${MAX_CONTACTS} contacts per request`);
+    }
+    const b = parse(ContactsBody, req.body);
+    if (!req.user.share_contacts) throw conflict('sharing_off', 'Contact sharing is turned off');
+
+    // Dedupe by normalized phone (last entry wins); skip unparsable numbers and blank names.
+    const byPhone = new Map<string, string>();
+    for (const ct of b.contacts) {
+      const name = ct.name.trim().slice(0, 100);
+      const phone = normalizePhone(ct.phone, cfg.defaultRegion);
+      if (phone && name) byPhone.set(phone, name);
+    }
+    const phones = [...byPhone.keys()];
+    const v = vault();
+    const hashes = phones.map((p) => v.index(p));
+    const sealed = phones.map((p) => v.seal(p, byPhone.get(p)!));
+    // Replace the stored set in place: drop numbers no longer sent, upsert the
+    // rest (each stamped with this sync's time, as a full rewrite would).
+    await withTx(pool, async (c) => {
+      await c.query('DELETE FROM contacts WHERE user_id = $1 AND NOT (phone_hash = ANY($2::bytea[]))', [
+        req.user.id,
+        hashes,
+      ]);
+      if (phones.length) {
+        // A number that stays in the address book keeps its family_only flag.
+        await c.query(
+          `INSERT INTO contacts (user_id, phone_hash, name_enc)
+           SELECT $1, h, e FROM unnest($2::bytea[], $3::bytea[]) AS t(h, e)
+           ON CONFLICT (user_id, phone_hash) DO UPDATE SET name_enc = EXCLUDED.name_enc, updated_at = now()`,
+          [req.user.id, hashes, sealed],
+        );
+      }
+    });
+    return { stored: phones.length };
+  });
+
+  app.delete('/contacts', async (req, reply) => {
+    await pool.query('DELETE FROM contacts WHERE user_id = $1', [req.user.id]);
+    return reply.status(204).send();
+  });
+}

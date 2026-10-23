@@ -1,0 +1,60 @@
+# SureCaller server.
+#   docker compose up -d --build                  # API on http://127.0.0.1:${PORT:-3000} (this host only)
+#   docker compose --profile https up -d --build  # + Caddy with automatic HTTPS for ${DOMAIN}
+# The API port binds to 127.0.0.1 by default. To expose plain HTTP on every
+# interface (e.g. for a LAN test), set BIND_ADDRESS=0.0.0.0 in .env.
+# Behind Caddy or another reverse proxy, set TRUST_PROXY=1 in .env so rate
+# limits see the real client IP.
+name: surecaller
+
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-surecaller}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-surecaller}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Inside the container the API always listens on 3000; PORT in .env is the host port.
+      PORT: "3000"
+      DATABASE_URL: postgres://${POSTGRES_USER:-surecaller}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-surecaller}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-3000}:3000"
+    volumes:
+      - ./downloads:/app/downloads:ro
+      - ./secrets:/app/secrets:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+  caddy:
+    image: caddy:2
+    profiles: ["https"]
+    restart: unless-stopped
+    command: caddy reverse-proxy --from ${DOMAIN:-localhost} --to api:3000
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

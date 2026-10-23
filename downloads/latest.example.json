@@ -1,0 +1,9 @@
+{
+  "versionCode": 1,
+  "versionName": "1.0.0",
+  "apkUrl": "surecaller-1.0.0.apk",
+  "sha256": null,
+  "minVersionCode": null,
+  "mandatory": false,
+  "notes": "Example only: sha256 is null here, so phones would offer a manual install only. A real release sets sha256 to the APK's SHA-256 (see the README)."
+}
