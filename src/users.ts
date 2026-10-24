@@ -5,7 +5,10 @@ export interface UserRow {
   id: string;
   phone: string;
   name: string;
+  family_id: string;
+  /** Admin of their own family. */
   is_admin: boolean;
+  /** From the family: adds to the shared caller-ID names and spam labels. */
   trusted: boolean;
   status: string | null;
   share_contacts: boolean;
@@ -17,9 +20,9 @@ export interface UserRow {
   shared_contact_count?: number;
 }
 
-export const USER_SELECT = `SELECT u.*,
+export const USER_SELECT = `SELECT u.*, f.trusted,
   (SELECT count(*) FROM contacts c WHERE c.user_id = u.id) AS shared_contact_count
-  FROM users u`;
+  FROM users u JOIN families f ON f.id = u.family_id`;
 
 export function toUser(row: UserRow) {
   const p = row.protection ?? {};
@@ -51,7 +54,7 @@ export async function getUser(db: Client, id: string): Promise<UserRow | null> {
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Throws `409 last_admin` unless the circle still has an admin after the change.
+ * Throws `409 last_admin` unless the member's family still has an admin after the change.
  * Demoting: the target can't be the only admin. Removing: the only admin may
  * go only when nobody else is left. Call under lockCircle so concurrent
  * membership changes can't race past it.
@@ -65,11 +68,11 @@ export async function assertKeepsAnAdmin(
     `SELECT bool_or(is_admin) FILTER (WHERE id = $1) AS target_admin,
        count(*) FILTER (WHERE is_admin) AS admins,
        count(*) FILTER (WHERE id <> $1) AS others
-     FROM users`,
+     FROM users WHERE family_id = (SELECT family_id FROM users WHERE id = $1)`,
     [id],
   );
   const r = rows[0];
   if (!r.target_admin || r.admins > 1) return;
   if ('removing' in change && r.others === 0) return;
-  throw conflict('last_admin', 'The circle needs at least one admin');
+  throw conflict('last_admin', 'The family needs at least one admin');
 }

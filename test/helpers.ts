@@ -36,7 +36,7 @@ export async function createHarness(overrides: Partial<Config> = {}): Promise<Ha
   });
   const pool = new pg.Pool({ connectionString: cfg.databaseUrl, max: 10 });
   await migrate(pool);
-  await pool.query(`TRUNCATE users, invites, contacts, reports, name_suggestions, lookups,
+  await pool.query(`TRUNCATE families, users, invites, contacts, reports, name_suggestions, lookups,
     spam_state, blocks, events, url_reports, telemetry RESTART IDENTITY CASCADE`);
   const sent: Harness['sent'] = [];
   const notifier: Notifier = {

@@ -56,7 +56,7 @@ export async function checkRoutes(app: FastifyInstance) {
     const phoneList = phonesInText(b.text, cfg.defaultRegion).slice(0, MAX_ITEMS);
     const urlList = urlsInText(b.text).slice(0, MAX_ITEMS);
     const [phones, urls] = await Promise.all([
-      buildLookups(pool, phoneList, threshold, undefined, req.user.trusted),
+      buildLookups(pool, phoneList, threshold, undefined, req.user.family_id),
       Promise.all(urlList.map((u) => urlInfo(pool, u, threshold))),
     ]);
 
@@ -76,7 +76,7 @@ export async function checkRoutes(app: FastifyInstance) {
   });
 
   app.post('/reports/url', async (req) => {
-    requireTrusted(req); // only family contributes to the shared URL spam list
+    requireTrusted(req); // only trusted families add to the shared URL spam list
     const b = parse(UrlReportBody, req.body);
     const url = normalizeUrl(b.url);
     if (!url) throw badRequest('invalid_url', 'Not a valid web link');

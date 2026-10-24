@@ -50,29 +50,41 @@ export async function publicRoutes(app: FastifyInstance) {
         // Serialize registrations so two people can't both bootstrap as admin.
         await lockCircle(c);
         const existing = (
-          await c.query<UserRow>('SELECT * FROM users WHERE phone = $1 FOR UPDATE', [phone])
+          await c.query<UserRow>(
+            `SELECT u.*, f.trusted FROM users u JOIN families f ON f.id = u.family_id
+             WHERE u.phone = $1 FOR UPDATE OF u`,
+            [phone],
+          )
         ).rows[0];
+        const newFamily = async (trusted: boolean) =>
+          (await c.query<{ id: string }>('INSERT INTO families (trusted) VALUES ($1) RETURNING id', [trusted]))
+            .rows[0].id;
 
         let makeAdmin = false;
         let adminTakeover: { id: string; name: string } | null = null;
         let inviteCode: string | null = null;
+        let familyId: string | null = null; // the family a new member joins
         // Case-insensitive: the app uppercases every code it sends, and `openssl rand -hex` is lowercase.
         if (code && cfg.adminCode && safeEqual(code.toUpperCase(), cfg.adminCode.toUpperCase())) {
-          const { rows } = await c.query<{ any: boolean }>(
-            'SELECT EXISTS (SELECT 1 FROM users WHERE is_admin) AS any',
-          );
-          // ADMIN_CODE bootstraps the first admin, and lets an existing admin re-register.
-          // The re-register path stays open on purpose: a sole admin who loses their phone has
-          // no other way back in. That makes ADMIN_CODE a master credential (it rotates that
-          // admin's token and signs the old device out), so every such use is logged below.
-          if (rows[0].any && !existing?.is_admin) throw invalidCode();
-          if (existing?.is_admin) adminTakeover = { id: existing.id, name: existing.name };
+          const op = (await c.query<{ id: string }>('SELECT id FROM families WHERE trusted LIMIT 1')).rows[0];
+          if (op) {
+            // ADMIN_CODE set up the trusted (operator's) family; after that it only lets that
+            // family's admins re-register. It stays open on purpose: a sole admin who loses their
+            // phone has no other way back in. That makes ADMIN_CODE a master credential (it rotates
+            // that admin's token and signs the old device out), so every such use is logged below.
+            if (!existing?.is_admin || existing.family_id !== op.id) throw invalidCode();
+            adminTakeover = { id: existing.id, name: existing.name };
+          } else if (existing) {
+            await c.query('UPDATE families SET trusted = true WHERE id = $1', [existing.family_id]);
+          } else {
+            familyId = await newFamily(true);
+          }
           makeAdmin = true;
         } else if (code) {
-          // A non-empty code is treated as an invite code (admins can still invite).
+          // A non-empty code is treated as an invite code: it joins the inviter's family.
           const invite = (
-            await c.query<{ code: string; phone: string | null }>(
-              `SELECT code, phone FROM invites
+            await c.query<{ code: string; phone: string | null; family_id: string }>(
+              `SELECT code, phone, family_id FROM invites
                WHERE code = $1 AND used_at IS NULL AND expires_at > now() FOR UPDATE`,
               [canonicalInviteCode(code)],
             )
@@ -83,35 +95,37 @@ export async function publicRoutes(app: FastifyInstance) {
           if (invite.phone === null && existing) {
             throw conflict('phone_taken', 'This number is already registered; ask an admin to reset your device');
           }
+          // Resetting a device never moves a member into another family.
+          if (existing && existing.family_id !== invite.family_id) throw invalidCode();
           await c.query('UPDATE invites SET used_at = now() WHERE code = $1', [invite.code]);
           inviteCode = invite.code;
+          familyId = invite.family_id;
         } else {
-          // Open sign-up: no code needed. A brand-new number joins as a normal member;
+          // Open sign-up: no code needed. A brand-new number starts its own family as its admin;
           // an existing number can't be taken over without an admin reset (anti-hijack).
           if (existing) {
             throw conflict('phone_taken', 'This number is already registered; ask an admin to reset your device');
           }
+          familyId = await newFamily(false);
+          makeAdmin = true;
         }
-
-        // Family ("trusted"): admins and anyone who used an invite code. Open sign-ups aren't.
-        const makeTrusted = makeAdmin || inviteCode !== null;
 
         let id: string;
         if (existing) {
           await c.query(
             `UPDATE users SET token_hash = $2, device_name = coalesce($3, device_name),
                name = coalesce(nullif($4, ''), name), is_admin = is_admin OR $5,
-               trusted = trusted OR $6, fcm_token = NULL, last_seen_at = now()
+               fcm_token = NULL, last_seen_at = now()
              WHERE id = $1`,
-            [existing.id, hashToken(token), body.deviceName ?? null, body.name ?? null, makeAdmin, makeTrusted],
+            [existing.id, hashToken(token), body.deviceName ?? null, body.name ?? null, makeAdmin],
           );
           id = existing.id;
         } else {
           if (!body.name) throw badRequest('invalid_request', 'name: required');
           const { rows } = await c.query<{ id: string }>(
-            `INSERT INTO users (phone, name, is_admin, trusted, device_name, token_hash, last_seen_at)
+            `INSERT INTO users (phone, name, is_admin, family_id, device_name, token_hash, last_seen_at)
              VALUES ($1, $2, $3, $4, $5, $6, now()) RETURNING id`,
-            [phone, body.name, makeAdmin, makeTrusted, body.deviceName ?? null, hashToken(token)],
+            [phone, body.name, makeAdmin, familyId, body.deviceName ?? null, hashToken(token)],
           );
           id = rows[0].id;
         }

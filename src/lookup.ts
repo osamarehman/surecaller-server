@@ -237,10 +237,9 @@ export async function buildLookups(
   pool: Pool,
   phoneList: string[],
   threshold: number,
-  spamRaw?: Map<string, RawSpam>,
-  // Untrusted (open sign-up) callers never learn that a number belongs to a member, or their
-  // status; the name still resolves from shared contacts / suggestions.
-  trusted = true,
+  spamRaw: Map<string, RawSpam> | undefined,
+  // The caller's family: member badges and block rules come only from it.
+  familyId: string,
 ): Promise<Lookup[]> {
   const phones = [...new Set(phoneList)];
   if (phones.length === 0) return [];
@@ -248,15 +247,16 @@ export async function buildLookups(
   const [callsBy, memberRes, contactRes, suggestRes, blockRes, spamBy] = await Promise.all([
     callCounts(pool, phones),
     pool.query<{ phone: string; id: string; name: string; status: string | null }>(
-      // Only family (trusted) are "members"; an open sign-up's number is never badged as one.
-      'SELECT phone, id, name, status FROM users WHERE trusted AND phone = ANY($1::text[])',
-      [phones],
+      // Only your own family members are badged as "member"; other families stay invisible.
+      'SELECT phone, id, name, status FROM users WHERE family_id = $2 AND phone = ANY($1::text[])',
+      [phones, familyId],
     ),
-    // Contacts shared before open sign-up (family_only) only answer family lookups.
+    // Contacts shared before open sign-up (family_only) only answer the uploader's family.
     pool.query<{ phone_hash: Buffer; name_enc: Buffer; at: Date }>(
       `SELECT phone_hash, name_enc, updated_at AS at FROM contacts
-       WHERE phone_hash = ANY($1::bytea[]) AND ($2 OR NOT family_only)`,
-      [index.hashes, trusted],
+       WHERE phone_hash = ANY($1::bytea[])
+         AND (NOT family_only OR user_id IN (SELECT id FROM users WHERE family_id = $2))`,
+      [index.hashes, familyId],
     ),
     pool.query<{ phone_hash: Buffer; name_enc: Buffer; at: Date }>(
       'SELECT phone_hash, name_enc, created_at AS at FROM name_suggestions WHERE phone_hash = ANY($1::bytea[])',
@@ -265,12 +265,12 @@ export async function buildLookups(
     pool.query<{ phone: string; added_by: string | null }>(
       `SELECT DISTINCT ON (p.phone) p.phone, coalesce(u.name, b.added_by_name) AS added_by
        FROM unnest($1::text[]) AS p(phone)
-       JOIN blocks b ON b.deleted_at IS NULL AND (
+       JOIN blocks b ON b.family_id = $2 AND b.deleted_at IS NULL AND (
          (b.type = 'number' AND b.value = p.phone) OR
          (b.type IN ('prefix', 'country') AND starts_with(p.phone, b.value)))
        LEFT JOIN users u ON u.id = b.added_by
        ORDER BY p.phone, length(b.value) DESC`,
-      [phones],
+      [phones, familyId],
     ),
     spamRaw ?? rawSpam(pool, phones),
   ]);
@@ -281,7 +281,7 @@ export async function buildLookups(
 
   return phones.map((phone): Lookup => {
     const calls = callsBy.get(phone) ?? 0;
-    const member = trusted ? (memberBy.get(phone) ?? null) : null;
+    const member = memberBy.get(phone) ?? null;
     const contacts = contactsBy.get(phone) ?? [];
     const suggested = suggestBy.get(phone) ?? [];
     const block = blockBy.get(phone);
@@ -309,7 +309,7 @@ export async function buildLookups(
       savedByCount: contacts.reduce((s, c) => s + c.count, 0),
       member: member ? { id: member.id, name: member.name, status: member.status } : null,
       spam: toSpamInfo(spamBy.get(phone) ?? NO_REPORTS, threshold, calls),
-      blocked: block ? { byCircle: true, addedBy: trusted ? block.added_by : null } : null,
+      blocked: block ? { byCircle: true, addedBy: block.added_by } : null,
       callsToday: calls,
     };
   });
@@ -318,10 +318,10 @@ export async function buildLookups(
 export async function buildLookup(
   pool: Pool,
   phone: string,
-  opts: { threshold: number; logUserId?: string; spamRaw?: Map<string, RawSpam>; trusted?: boolean },
+  opts: { threshold: number; familyId: string; logUserId?: string; spamRaw?: Map<string, RawSpam> },
 ): Promise<Lookup> {
   if (opts.logUserId) {
     await pool.query('INSERT INTO lookups (phone_hash, user_id) VALUES ($1, $2)', [vault().index(phone), opts.logUserId]);
   }
-  return (await buildLookups(pool, [phone], opts.threshold, opts.spamRaw, opts.trusted ?? true))[0];
+  return (await buildLookups(pool, [phone], opts.threshold, opts.spamRaw, opts.familyId))[0];
 }

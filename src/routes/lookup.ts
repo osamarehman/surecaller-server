@@ -39,7 +39,7 @@ export async function lookupRoutes(app: FastifyInstance) {
       return buildLookup(pool, phone, {
         threshold,
         logUserId: req.user.trusted ? req.user.id : undefined,
-        trusted: req.user.trusted,
+        familyId: req.user.family_id,
       });
     },
   );
@@ -60,11 +60,11 @@ export async function lookupRoutes(app: FastifyInstance) {
       throw tooManyRequests(waitMs);
     }
     // A fixed handful of set-based queries, run in parallel.
-    return { results: await buildLookups(pool, phones, threshold, undefined, req.user.trusted) };
+    return { results: await buildLookups(pool, phones, threshold, undefined, req.user.family_id) };
   });
 
   app.post('/reports', async (req) => {
-    requireTrusted(req); // only family contributes to the shared spam list
+    requireTrusted(req); // only trusted families add to the shared spam list
     const b = parse(ReportBody, req.body);
     const phone = requirePhone(b.phone, cfg.defaultRegion);
     const spamRaw = await withTx(pool, async (c) => {
@@ -77,7 +77,7 @@ export async function lookupRoutes(app: FastifyInstance) {
       );
       return refreshSpamState(c, [phone], threshold);
     });
-    return buildLookup(pool, phone, { threshold, spamRaw, trusted: req.user.trusted });
+    return buildLookup(pool, phone, { threshold, spamRaw, familyId: req.user.family_id });
   });
 
   app.delete<{ Params: { phone: string } }>('/reports/:phone', async (req, reply) => {
@@ -90,7 +90,7 @@ export async function lookupRoutes(app: FastifyInstance) {
   });
 
   app.post('/names', async (req) => {
-    requireTrusted(req); // only family suggests shared names
+    requireTrusted(req); // only trusted families suggest shared names
     const b = parse(NameBody, req.body);
     const phone = requirePhone(b.phone, cfg.defaultRegion);
     await pool.query(
@@ -99,6 +99,6 @@ export async function lookupRoutes(app: FastifyInstance) {
        ON CONFLICT (user_id, phone_hash) DO UPDATE SET name_enc = EXCLUDED.name_enc, created_at = now()`,
       [req.user.id, vault().index(phone), vault().seal(phone, b.name)],
     );
-    return buildLookup(pool, phone, { threshold, trusted: req.user.trusted });
+    return buildLookup(pool, phone, { threshold, familyId: req.user.family_id });
   });
 }

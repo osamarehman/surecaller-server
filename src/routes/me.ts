@@ -30,8 +30,8 @@ const PatchMe = z.object({
 export async function deleteMember(pool: pg.Pool, userId: string, threshold: number): Promise<void> {
   await withTx(pool, async (c) => {
     await lockCircle(c);
-    const { rowCount } = await c.query('SELECT 1 FROM users WHERE id = $1', [userId]);
-    if (!rowCount) throw notFound('Member not found');
+    const { rows } = await c.query<{ family_id: string }>('SELECT family_id FROM users WHERE id = $1', [userId]);
+    if (!rows[0]) throw notFound('Member not found');
     await assertKeepsAnAdmin(c, { removing: userId });
     await refreshSpamForUser(c, userId, threshold, async () => {
       // Keep the adder's name on circle blocks they created.
@@ -41,6 +41,10 @@ export async function deleteMember(pool: pg.Pool, userId: string, threshold: num
       );
       await c.query('DELETE FROM users WHERE id = $1', [userId]);
     });
+    // The last member out takes the family (and its invites and block list) with them.
+    await c.query('DELETE FROM families f WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM users WHERE family_id = f.id)', [
+      rows[0].family_id,
+    ]);
   });
 }
 

@@ -5,7 +5,7 @@ import { api, createHarness, registerAdmin, type Harness } from './helpers.js';
 let h: Harness;
 beforeAll(async () => {
   h = await createHarness();
-  await h.pool.query('TRUNCATE users, privacy_requests, opt_outs CASCADE');
+  await h.pool.query('TRUNCATE families, users, privacy_requests, opt_outs CASCADE');
 });
 afterAll(async () => {
   await h.close();

@@ -126,7 +126,8 @@ describe('register, admin bootstrap and invites', () => {
 
   it('rejects expired invites', async () => {
     await h.pool.query(
-      "INSERT INTO invites (code, expires_at) VALUES ('ABCD-EFGH', now() - interval '1 minute')",
+      `WITH f AS (INSERT INTO families DEFAULT VALUES RETURNING id)
+       INSERT INTO invites (code, expires_at, family_id) SELECT 'ABCD-EFGH', now() - interval '1 minute', id FROM f`,
     );
     const r = await api(h, 'POST', '/v1/register', null, { phone: '+923451234567', name: 'L', code: 'ABCD-EFGH' });
     expect(r.status).toBe(403);
@@ -172,7 +173,7 @@ describe('auth failures', () => {
 
 describe('me and members', () => {
   it('patches profile, lists and manages members', async () => {
-    await h.pool.query('TRUNCATE users, invites CASCADE');
+    await h.pool.query('TRUNCATE families, users, invites CASCADE');
     const admin = await registerAdmin(h);
     const inv = await api(h, 'POST', '/v1/invites', admin.token, {});
     const m = (await api(h, 'POST', '/v1/register', null, { phone: '+923211111111', name: 'Ali', code: inv.body.code }))

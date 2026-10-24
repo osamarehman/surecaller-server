@@ -46,9 +46,10 @@ export async function userFromToken(req: FastifyRequest): Promise<UserRow | null
   const header = req.headers.authorization ?? '';
   const m = /^Bearer\s+([0-9a-fA-F]{64})\s*$/.exec(header);
   if (!m) return null;
-  const { rows } = await req.server.ctx.pool.query<UserRow>('SELECT * FROM users WHERE token_hash = $1', [
-    hashToken(m[1].toLowerCase()),
-  ]);
+  const { rows } = await req.server.ctx.pool.query<UserRow>(
+    'SELECT u.*, f.trusted FROM users u JOIN families f ON f.id = u.family_id WHERE u.token_hash = $1',
+    [hashToken(m[1].toLowerCase())],
+  );
   return rows[0] ?? null;
 }
 
@@ -63,13 +64,23 @@ export async function authenticate(req: FastifyRequest): Promise<void> {
   }
 }
 
+/** Admin of their own family. */
 export function requireAdmin(req: FastifyRequest): void {
   if (!req.user.is_admin) throw forbidden();
 }
 
-/** Family-only endpoints (member list, SOS, status). Open sign-ups are untrusted. */
+/** Adds to what every user sees (shared names, spam labels): trusted families only. */
 export function requireTrusted(req: FastifyRequest): void {
-  if (!req.user.trusted) throw forbidden('This is only for your family group.');
+  if (!req.user.trusted) throw forbidden('Only trusted families add to the shared caller ID.');
+}
+
+/**
+ * Server-wide powers (everyone's telemetry). The operator is an admin of a trusted family.
+ * ponytail: the only trusted family is the one ADMIN_CODE set up; add an operator flag if
+ * other families ever get trusted.
+ */
+export function requireOperator(req: FastifyRequest): void {
+  if (!req.user.is_admin || !req.user.trusted) throw forbidden();
 }
 
 /** Parses an optional ISO `since` query value. Empty/absent = null. */

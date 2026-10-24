@@ -39,9 +39,11 @@ must share your changes with them under the same licence.
   numbers, because phones download them for offline blocking.
 - **Logs.** App logs and crash reports are tied to a random install ID and are deleted after
   `TELEMETRY_RETENTION_DAYS` (14 by default). The app masks phone numbers before sending them.
-- **Family data stays in the family.** Accounts that joined with an invite code are "trusted".
-  Open sign-ups only get caller ID and spam labels: never the member list, SOS alerts with
-  locations, or contacts shared before open sign-up existed.
+- **Family data stays in the family.** Every user belongs to one family: sign up without a code
+  to start your own, or use an invite to join one. Members, alerts, SOS locations and the block
+  list never cross families. Only the trusted family (the operator's, set up with `ADMIN_CODE`)
+  adds to the shared caller-ID names and spam labels, and contacts shared before open sign-up
+  only answer that family's lookups.
 
 ## Contributing
 
@@ -139,8 +141,8 @@ after a recovery or a suspected leak. Each such re-registration is logged with a
 (`docker compose logs api | grep ADMIN_CODE`).
 
 **Open sign-up.** Registration needs no invite code: anyone who installs the app can create an
-account with just a name and number, and everyone shares one pool (synced contacts and spam
-reports feed every user's caller ID, Truecaller-style). There is **no proof of number ownership**
+account with just a name and number, and starts a family of their own. Every user gets the shared
+caller ID, which is fed by the trusted family's synced contacts and spam reports. There is **no proof of number ownership**
 (no OTP), so a number can be squatted by someone else, and sign-ups are limited only by the
 per-IP `REGISTER_RATE_LIMIT`. This is deliberate for a small, trusted deployment. If the server
 is public, put it behind an allowlist/OTP or keep its URL private. An existing number can never be

@@ -29,10 +29,12 @@ const ContactsBody = z.object({
 export async function circleRoutes(app: FastifyInstance) {
   const { cfg, pool } = app.ctx;
 
+  // Members, invites and stats are per family: nobody sees another family.
   app.get('/members', async (req) => {
-    requireTrusted(req); // open sign-ups never see the member roster
-    // Only family (trusted) are members; open sign-ups are not listed.
-    const { rows } = await pool.query<UserRow>(`${USER_SELECT} WHERE u.trusted ORDER BY u.is_admin DESC, lower(u.name)`);
+    const { rows } = await pool.query<UserRow>(
+      `${USER_SELECT} WHERE u.family_id = $1 ORDER BY u.is_admin DESC, lower(u.name)`,
+      [req.user.family_id],
+    );
     return { members: rows.map(toUser) };
   });
 
@@ -43,12 +45,13 @@ export async function circleRoutes(app: FastifyInstance) {
     if (!UUID_RE.test(id)) throw notFound('Member not found');
     await withTx(pool, async (c) => {
       await lockCircle(c);
-      const target = (await c.query<UserRow>('SELECT * FROM users WHERE id = $1', [id])).rows[0];
+      const target = (
+        await c.query<UserRow>('SELECT * FROM users WHERE id = $1 AND family_id = $2', [id, req.user.family_id])
+      ).rows[0];
       if (!target) throw notFound('Member not found');
       if (b.isAdmin === false) await assertKeepsAnAdmin(c, { demoting: id });
       await c.query(
-        `UPDATE users SET watched = coalesce($2, watched), is_admin = coalesce($3, is_admin),
-           trusted = trusted OR coalesce($3, false) WHERE id = $1`,
+        'UPDATE users SET watched = coalesce($2, watched), is_admin = coalesce($3, is_admin) WHERE id = $1',
         [id, b.watched ?? null, b.isAdmin ?? null],
       );
       // Admin reports count as likely_scam, so a role change can flip labels.
@@ -63,6 +66,11 @@ export async function circleRoutes(app: FastifyInstance) {
     requireAdmin(req);
     const id = req.params.id;
     if (!UUID_RE.test(id)) throw notFound('Member not found');
+    const { rowCount } = await pool.query('SELECT 1 FROM users WHERE id = $1 AND family_id = $2', [
+      id,
+      req.user.family_id,
+    ]);
+    if (!rowCount) throw notFound('Member not found');
     await deleteMember(pool, id, cfg.spamThreshold);
     return reply.status(204).send();
   });
@@ -73,9 +81,16 @@ export async function circleRoutes(app: FastifyInstance) {
   app.post('/invites', async (req, reply) => {
     const b = parse(InviteBody, req.body);
     const phone = b.phone ? requirePhone(b.phone, cfg.defaultRegion) : null;
-    // Phone-bound (device-reset) codes stay admin-only; open sign-ups can't invite at all.
-    if (!req.user.is_admin && (phone || !req.user.trusted)) throw forbidden();
+    // Phone-bound (device-reset) codes are admin-only.
+    if (!req.user.is_admin && phone) throw forbidden();
     const result = await withTx(pool, async (c) => {
+      // An admin can only reset devices in their own family, never take over someone else's number.
+      if (phone) {
+        const { rows } = await c.query<{ family_id: string }>('SELECT family_id FROM users WHERE phone = $1', [phone]);
+        if (rows[0] && rows[0].family_id !== req.user.family_id) {
+          throw conflict('phone_taken', 'This number belongs to another family');
+        }
+      }
       if (!req.user.is_admin) {
         // Lock so concurrent invites can't each read < limit and all insert.
         await lockCircle(c);
@@ -91,10 +106,10 @@ export async function circleRoutes(app: FastifyInstance) {
       for (let attempt = 0; attempt < 5; attempt++) {
         const code = newInviteCode();
         const { rows } = await c.query<{ expires_at: Date }>(
-          `INSERT INTO invites (code, created_by, expires_at, phone)
-           VALUES ($1, $2, now() + make_interval(hours => $3), $4)
+          `INSERT INTO invites (code, created_by, expires_at, phone, family_id)
+           VALUES ($1, $2, now() + make_interval(hours => $3), $4, $5)
            ON CONFLICT (code) DO NOTHING RETURNING expires_at`,
-          [code, req.user.id, b.expiresInHours, phone],
+          [code, req.user.id, b.expiresInHours, phone, req.user.family_id],
         );
         if (rows[0]) return { code, expiresAt: rows[0].expires_at.toISOString(), phone };
       }
@@ -103,22 +118,23 @@ export async function circleRoutes(app: FastifyInstance) {
     return reply.status(201).send(result);
   });
 
+  // members and blocked are this family's; knownNumbers is the shared caller-ID database.
   app.get('/stats', async (req) => {
-    requireTrusted(req);
     const userPhones = (await pool.query<{ phone: string }>('SELECT phone FROM users')).rows;
     const { rows } = await pool.query<{ members: number; known: number; blocked: number }>(
       `SELECT
-         (SELECT count(*) FROM users) AS members,
+         (SELECT count(*) FROM users WHERE family_id = $2) AS members,
          (SELECT count(*) FROM (SELECT phone_hash FROM contacts UNION SELECT phone_hash FROM name_suggestions
                                 UNION SELECT unnest($1::bytea[])) k) AS known,
-         (SELECT count(*) FROM events WHERE type = 'spam_call') AS blocked`,
-      [userPhones.map((u) => vault().index(u.phone))],
+         (SELECT count(*) FROM events e JOIN users u ON u.id = e.from_user
+          WHERE e.type = 'spam_call' AND u.family_id = $2) AS blocked`,
+      [userPhones.map((u) => vault().index(u.phone)), req.user.family_id],
     );
     return { members: rows[0].members, knownNumbers: rows[0].known, spamBlocked: rows[0].blocked };
   });
 
   app.post('/contacts/sync', async (req) => {
-    requireTrusted(req); // only family contributes names to the shared database
+    requireTrusted(req); // only trusted families add names to the shared database
     const raw = req.body as { contacts?: unknown } | undefined;
     if (Array.isArray(raw?.contacts) && raw.contacts.length > MAX_CONTACTS) {
       throw badRequest('too_many_contacts', `At most ${MAX_CONTACTS} contacts per request`);

@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { z } from 'zod';
 import { badRequest } from '../errors.js';
-import { parse, parseSince, requireAdmin, userFromToken } from '../http.js';
+import { parse, parseSince, requireOperator, userFromToken } from '../http.js';
 import { redactPhones } from '../phone.js';
 
 export const LEVELS = ['debug', 'info', 'warn', 'error', 'fatal'] as const;
@@ -280,7 +280,7 @@ export async function telemetryAdminRoutes(app: FastifyInstance) {
   const { pool } = app.ctx;
 
   app.get('/telemetry', async (req) => {
-    requireAdmin(req);
+    requireOperator(req);
     const q = parse(ListQuery, req.query);
     const events = await queryTelemetry(pool, {
       installId: q.installId,
@@ -295,7 +295,7 @@ export async function telemetryAdminRoutes(app: FastifyInstance) {
   });
 
   app.get('/telemetry/installs', async (req) => {
-    requireAdmin(req);
+    requireOperator(req);
     return { installs: await queryInstalls(pool) };
   });
 }

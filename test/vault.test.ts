@@ -47,7 +47,7 @@ describe('contacts at rest', () => {
   });
 
   it('encrypts leftover plaintext tables once, as family-only, and drops them', async () => {
-    await h.pool.query('TRUNCATE users, invites, contacts, name_suggestions, lookups CASCADE');
+    await h.pool.query('TRUNCATE families, users, invites, contacts, name_suggestions, lookups CASCADE');
     const admin = await registerAdmin(h);
     await h.pool.query(`CREATE TABLE contacts_plain (user_id uuid, phone text, name text, updated_at timestamptz DEFAULT now());
       INSERT INTO contacts_plain (user_id, phone, name) VALUES ('${admin.user.id}', '+923216660011', 'Old Family Contact')`);

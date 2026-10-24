@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { Budget } from '../src/budget.js';
 import { buildLookup, buildLookups } from '../src/lookup.js';
-import { api, createHarness, registerAdmin, registerMember, type Harness, type Session } from './helpers.js';
+import { ADMIN_CODE, api, createHarness, registerAdmin, registerMember, type Harness, type Session } from './helpers.js';
 
 let h: Harness;
 beforeAll(async () => {
@@ -12,7 +12,7 @@ afterAll(async () => {
   await h.close();
 });
 beforeEach(async () => {
-  await h.pool.query(`TRUNCATE users, invites, contacts, reports, name_suggestions, lookups,
+  await h.pool.query(`TRUNCATE families, users, invites, contacts, reports, name_suggestions, lookups,
     spam_state, blocks, events, url_reports RESTART IDENTITY CASCADE`);
 });
 
@@ -44,46 +44,66 @@ describe('invite takeover protection', () => {
     expect(fresh.status).toBe(201);
   });
 
-  it('open sign-up: no code registers a new phone as a normal member; existing needs a reset', async () => {
+  it('open sign-up starts its own family as admin; existing needs a reset', async () => {
     const r = await api(h, 'POST', '/v1/register', null, { phone: '+923215550000', name: 'Open' });
     expect(r.status).toBe(201);
-    expect(r.body.user.isAdmin).toBe(false);
-    expect(r.body.user.isTrusted).toBe(false); // open sign-up is not family
-    // Untrusted can't see the member roster or raise SOS.
-    expect((await api(h, 'GET', '/v1/members', r.body.token)).status).toBe(403);
-    expect((await api(h, 'POST', '/v1/events', r.body.token, { type: 'sos' })).status).toBe(403);
+    expect(r.body.user.isAdmin).toBe(true); // admin of their own family
+    expect(r.body.user.isTrusted).toBe(false); // but doesn't add to the shared caller ID
+    const roster = await api(h, 'GET', '/v1/members', r.body.token);
+    expect(roster.body.members.map((m: { phone: string }) => m.phone)).toEqual(['+923215550000']);
+    expect((await api(h, 'POST', '/v1/events', r.body.token, { type: 'sos' })).status).toBe(201);
+    // Shared data stays with trusted families.
+    expect((await api(h, 'POST', '/v1/contacts/sync', r.body.token, { contacts: [] })).status).toBe(403);
+    expect((await api(h, 'POST', '/v1/reports', r.body.token, { phone: '+923004445566' })).status).toBe(403);
+    // Server-wide telemetry is for the operator only.
+    expect((await api(h, 'GET', '/v1/telemetry', r.body.token)).status).toBe(403);
+    // Their invite joins their family, untrusted too.
+    const inv = await api(h, 'POST', '/v1/invites', r.body.token, {});
+    const kid = await api(h, 'POST', '/v1/register', null, { phone: '+923215550009', name: 'Kid', code: inv.body.code });
+    expect(kid.status).toBe(201);
+    expect(kid.body.user.isTrusted).toBe(false);
+    expect((await api(h, 'GET', '/v1/members', r.body.token)).body.members).toHaveLength(2);
     // The same number can't be taken over without a code (anti-hijack).
     const again = await api(h, 'POST', '/v1/register', null, { phone: '+923215550000', name: 'Other' });
     expect(again.status).toBe(409);
     expect(again.body.error).toBe('phone_taken');
   });
 
-  it('untrusted never sees the member field or a block adder name', async () => {
+  it('families never see or touch each other', async () => {
     const admin = await registerAdmin(h); // admin's phone is +923001234567
-    // A circle block whose adder is the admin (family name).
     const blk = await api(h, 'POST', '/v1/blocks', admin.token, { type: 'number', value: '+923459990000' });
-    expect(blk.body.addedBy).not.toBeNull();
+    expect(blk.body.addedBy).toBe('Abbu');
+    await api(h, 'POST', '/v1/events', admin.token, { type: 'sos', message: 'help' });
     const open = await api(h, 'POST', '/v1/register', null, { phone: '+923215550001', name: 'Open' });
+    const t = open.body.token;
 
-    // Direct lookup of a member's number: no member field.
-    const look = await api(h, 'GET', `/v1/lookup/${encodeURIComponent('+923001234567')}`, open.body.token);
-    expect(look.body.member).toBeNull();
-    // Scam checker over text with a member's number: no member field either.
-    const chk = await api(h, 'POST', '/v1/check', open.body.token, { text: 'call +923001234567 now' });
+    // No member badge for another family's number, in lookups or the scam checker.
+    expect((await api(h, 'GET', `/v1/lookup/${encodeURIComponent('+923001234567')}`, t)).body.member).toBeNull();
+    const chk = await api(h, 'POST', '/v1/check', t, { text: 'call +923001234567 now' });
     expect(chk.body.phones?.every((p: { member: unknown }) => p.member === null)).toBe(true);
-    // Open sign-ups can't touch the shared block list (so never see the adder's name through it).
-    const dup = await api(h, 'POST', '/v1/blocks', open.body.token, { type: 'number', value: '+923459990000' });
-    expect(dup.status).toBe(403);
-    // The sync feed still gives them the rule, without the adder's name.
-    const sync = await api(h, 'GET', '/v1/sync', open.body.token);
-    expect(sync.body.blocks.length).toBeGreaterThan(0);
-    expect(sync.body.blocks.every((b: { addedBy: unknown }) => b.addedBy === null)).toBe(true);
-
-    // An open sign-up is never a family "member": absent from the roster and no member badge.
+    // Separate block lists: the same rule is new in the other family, and sync shows only your own.
+    const own = await api(h, 'POST', '/v1/blocks', t, { type: 'number', value: '+923459990000' });
+    expect(own.status).toBe(201);
+    expect(own.body.id).not.toBe(blk.body.id);
+    const sync = await api(h, 'GET', '/v1/sync', t);
+    expect(sync.body.blocks.map((b: { id: string }) => b.id)).toEqual([own.body.id]);
+    expect((await api(h, 'DELETE', `/v1/blocks/${blk.body.id}`, t)).status).toBe(404);
+    const look = await api(h, 'GET', `/v1/lookup/${encodeURIComponent('+923459990000')}`, admin.token);
+    expect(look.body.blocked).toEqual({ byCircle: true, addedBy: 'Abbu' });
+    // No alerts, roster or stats from the other family.
+    expect((await api(h, 'GET', '/v1/events', t)).body.events).toEqual([]);
+    expect((await api(h, 'GET', '/v1/stats', t)).body.members).toBe(1);
     const roster = await api(h, 'GET', '/v1/members', admin.token);
     expect(roster.body.members.some((m: { phone: string }) => m.phone === '+923215550001')).toBe(false);
-    const look2 = await api(h, 'GET', `/v1/lookup/${encodeURIComponent('+923215550001')}`, admin.token);
-    expect(look2.body.member).toBeNull();
+    expect((await api(h, 'GET', `/v1/lookup/${encodeURIComponent('+923215550001')}`, admin.token)).body.member).toBeNull();
+    // An admin can't manage, reset or invite their way into another family's member.
+    expect((await api(h, 'PATCH', `/v1/members/${admin.user.id}`, t, { watched: true })).status).toBe(404);
+    expect((await api(h, 'DELETE', `/v1/members/${admin.user.id}`, t)).status).toBe(404);
+    const steal = await api(h, 'POST', '/v1/invites', t, { phone: '+923001234567' });
+    expect(steal.status).toBe(409);
+    // ADMIN_CODE only works for the operator's family.
+    const code = await api(h, 'POST', '/v1/register', null, { phone: '+923215550001', code: ADMIN_CODE });
+    expect(code.status).toBe(403);
   });
 
   it('phone-bound invites work only for that phone and keep admin rights', async () => {
@@ -247,7 +267,10 @@ describe('batch lookup', () => {
     const batch = await api(h, 'POST', '/v1/lookup/batch', ali.token, { phones });
     expect(batch.status).toBe(200);
     const singles = [];
-    for (const p of phones) singles.push(await buildLookup(h.pool, p, { threshold: 2 }));
+    const { family_id: familyId } = (
+      await h.pool.query('SELECT family_id FROM users WHERE id = $1', [ali.user.id])
+    ).rows[0];
+    for (const p of phones) singles.push(await buildLookup(h.pool, p, { threshold: 2, familyId }));
     expect(batch.body.results).toEqual(JSON.parse(JSON.stringify(singles)));
     expect(batch.body.results[0].altNames).toEqual([]);
     expect(batch.body.results[1].spam).toMatchObject({ reports: 1, notSpam: 1, topCategory: 'scam', lastComment: 'PIN' });
@@ -256,7 +279,7 @@ describe('batch lookup', () => {
     expect(batch.body.results[3].blocked).toEqual({ byCircle: true, addedBy: 'Abbu' });
     expect(batch.body.results[3].spam.label).toBe('likely_scam');
     expect(batch.body.results[4].member.name).toBe('Sara');
-    expect(await buildLookups(h.pool, [], 2)).toEqual([]);
+    expect(await buildLookups(h.pool, [], 2, undefined, '00000000-0000-0000-0000-000000000000')).toEqual([]);
   });
 
   it('caps a batch at 100 numbers', async () => {

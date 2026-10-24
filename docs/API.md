@@ -13,15 +13,23 @@ sign-ups. Everything below is the contract between the Android app and the backe
 
 ## Joining
 
-The first person to register uses the server's `ADMIN_CODE` (env var) and becomes admin.
+Every user belongs to one **family**. Family data never crosses families: the member roster,
+invites, stats, SOS and alert events, the block list, and the `member` field on a lookup only
+ever show your own family. Caller-ID names and spam labels are shared by every user.
 
-Registration is **open**: `POST /v1/register` with no `code` creates a normal account for a
-brand-new number (an existing number still needs a reset — see below). Such open sign-ups are
-**untrusted**: they get caller-ID lookups (number → name + spam) only. The family features —
-the member roster (`GET /v1/members`), stats, SOS / alert events (`GET`/`POST /v1/events`), a
-member's status, and the `member` field on a lookup — are **trusted-only** (`403 forbidden`
-otherwise). A user becomes trusted by joining with an admin or invite code. Invites (still
-admin, or up to 5 per trusted member) remain:
+The first person to register uses the server's `ADMIN_CODE` (env var). That makes them admin of
+the **trusted** family (the operator's). After that, `ADMIN_CODE` only re-registers an admin of
+that family.
+
+Registration is **open**: `POST /v1/register` with no `code` creates a brand-new number's
+account in a new family of its own, with the user as its admin (an existing number still needs a
+reset, see below). An invite code joins the inviter's family.
+
+Only **trusted** families add to what everyone sees: contact sync, spam reports, name
+suggestions and link reports return `403 forbidden` for everyone else. `isTrusted` on a `User`
+says which. Server-wide admin routes (`GET /v1/telemetry`) are for admins of the trusted family.
+
+Invites (admins, or up to 5 per member):
 
 - **Plain invite** (`POST /v1/invites` without `phone`): joins a number that is *not* a
   member yet. It can never re-register an existing member.
@@ -83,7 +91,9 @@ Errors:
 
 ## Circle
 
-- `GET /v1/members` (trusted) → `{ "members": [User] }`
+All of these act on the caller's family only; another family's member is `404`.
+
+- `GET /v1/members` → `{ "members": [User] }`
 - `PATCH /v1/members/:id` (admin) `{ "watched": bool, "isAdmin": bool }` → `User`
 - `DELETE /v1/members/:id` (admin) → `204`. `409 last_admin` if it is the only admin and
   other members remain.
@@ -93,7 +103,9 @@ Errors:
   With `phone` (any format the server can normalize; `400 invalid_phone` otherwise) the code
   only registers that number and is the way to re-register an existing member ("Reset
   device"). Without it, `phone` is `null` and the code only registers a new number.
-- `GET /v1/stats` → `{ "members": 9, "knownNumbers": 2860, "spamBlocked": 47 }`
+  A `phone` that belongs to another family is `409 phone_taken`.
+- `GET /v1/stats` → `{ "members": 9, "knownNumbers": 2860, "spamBlocked": 47 }` (`members` and
+  `spamBlocked` are your family's; `knownNumbers` is the shared database)
 
 ## Contacts (crowd names)
 
@@ -171,24 +183,23 @@ not-spam votes ≥ `SPAM_THRESHOLD` (2), or any admin reported it; `suspected` a
 Empty `since` = full snapshot. Rows whose label dropped to `none` or were removed come back with
 `"deleted": true`. The app stores `serverTime` and sends it next time.
 
-### Circle block list
+### Family block list (one per family)
 - `POST /v1/blocks` `{ "type", "value", "label"? }` → block row. `number` = E.164, `prefix` = E.164 prefix
   (`+92304111`), `country` = calling code with plus (`+234`).
 - `DELETE /v1/blocks/:id` → `204`
 
 ## Events (family alerts + SOS)
 
-Events are trusted-only: untrusted sign-ups get `403` on `POST` and an empty list on `GET`,
-and never receive alert pushes.
+Events stay inside the sender's family.
 
-- `POST /v1/events` (trusted)
+- `POST /v1/events`
   ```json
   { "type": "spam_call" | "sos" | "scam_sms", "phone": "+92...", "message": "...", "lat": 31.52, "lng": 74.35 }
   ```
   → `201 Event`. `spam_call` / `scam_sms` go to admins (only for `watched` members);
-  `sos` goes to every trusted member. Delivered by FCM when `FCM_SERVICE_ACCOUNT` is configured,
+  `sos` goes to every other member of the family. Delivered by FCM when `FCM_SERVICE_ACCOUNT` is configured,
   always available by polling.
-- `GET /v1/events?since=<ISO>` (trusted) → `{ "events": [Event] }` (last 7 days, newest first)
+- `GET /v1/events?since=<ISO>` → `{ "events": [Event] }` (last 7 days, newest first)
 
 `Event`: `{ "id", "type", "fromUser": {"id","name"}, "phone", "message", "lat", "lng", "createdAt" }`
 

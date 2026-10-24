@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { badRequest, forbidden, notFound } from '../errors.js';
-import { parse, parseSince, requireTrusted } from '../http.js';
+import { parse, parseSince } from '../http.js';
 import { requirePhone } from '../phone.js';
 import { UUID_RE } from '../users.js';
 
@@ -18,14 +18,13 @@ interface BlockRow {
 const BLOCK_SELECT = `SELECT b.*, coalesce(u.name, b.added_by_name) AS added_by_display
   FROM blocks b LEFT JOIN users u ON u.id = b.added_by`;
 
-function toBlock(r: BlockRow, trusted = true) {
+function toBlock(r: BlockRow) {
   return {
     id: r.id,
     type: r.type,
     value: r.value,
     label: r.label,
-    // The adder's name is family info; untrusted sign-ups still get the rule, without the name.
-    addedBy: trusted ? r.added_by_display : null,
+    addedBy: r.added_by_display,
     deleted: r.deleted_at !== null,
   };
 }
@@ -61,9 +60,10 @@ export async function syncRoutes(app: FastifyInstance) {
       ),
       pool.query<BlockRow>(
         `${BLOCK_SELECT}
-         WHERE (($1::timestamptz IS NULL AND b.deleted_at IS NULL) OR b.updated_at >= $1) AND b.updated_at < $2
+         WHERE b.family_id = $3
+           AND (($1::timestamptz IS NULL AND b.deleted_at IS NULL) OR b.updated_at >= $1) AND b.updated_at < $2
          ORDER BY b.created_at`,
-        [since, serverTime],
+        [since, serverTime, req.user.family_id],
       ),
     ]);
 
@@ -77,12 +77,12 @@ export async function syncRoutes(app: FastifyInstance) {
         topCategory: r.top_category,
         deleted: r.label === 'none',
       })),
-      blocks: blocks.rows.map((r) => toBlock(r, req.user.trusted)),
+      blocks: blocks.rows.map(toBlock),
     };
   });
 
   app.post('/blocks', async (req, reply) => {
-    requireTrusted(req); // only family edits the shared block list
+    // Each family has its own block list.
     const b = parse(BlockBody, req.body);
     let value: string;
     if (b.type === 'number') {
@@ -100,26 +100,26 @@ export async function syncRoutes(app: FastifyInstance) {
     }
     // The adder is the caller, so added_by_name is the display name.
     const { rows } = await pool.query<BlockRow>(
-      `INSERT INTO blocks (type, value, label, added_by, added_by_name)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (type, value) WHERE deleted_at IS NULL DO NOTHING
+      `INSERT INTO blocks (type, value, label, added_by, added_by_name, family_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (family_id, type, value) WHERE deleted_at IS NULL DO NOTHING
        RETURNING *, added_by_name AS added_by_display`,
-      [b.type, value, b.label || null, req.user.id, req.user.name],
+      [b.type, value, b.label || null, req.user.id, req.user.name, req.user.family_id],
     );
-    if (rows[0]) return reply.status(201).send(toBlock(rows[0], req.user.trusted));
+    if (rows[0]) return reply.status(201).send(toBlock(rows[0]));
     const existing = await pool.query<BlockRow>(
-      `${BLOCK_SELECT} WHERE b.type = $1 AND b.value = $2 AND b.deleted_at IS NULL`,
-      [b.type, value],
+      `${BLOCK_SELECT} WHERE b.family_id = $3 AND b.type = $1 AND b.value = $2 AND b.deleted_at IS NULL`,
+      [b.type, value, req.user.family_id],
     );
-    return reply.status(200).send(toBlock(existing.rows[0], req.user.trusted));
+    return reply.status(200).send(toBlock(existing.rows[0]));
   });
 
   app.delete<{ Params: { id: string } }>('/blocks/:id', async (req, reply) => {
     const id = req.params.id;
     if (!UUID_RE.test(id)) throw notFound('Block not found');
     const { rows } = await pool.query<BlockRow>(
-      'SELECT * FROM blocks WHERE id = $1 AND deleted_at IS NULL',
-      [id],
+      'SELECT * FROM blocks WHERE id = $1 AND family_id = $2 AND deleted_at IS NULL',
+      [id, req.user.family_id],
     );
     const block = rows[0];
     if (!block) throw notFound('Block not found');
