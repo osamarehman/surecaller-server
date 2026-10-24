@@ -8,7 +8,7 @@ sign-ups. Everything below is the contract between the Android app and the backe
 - Phone numbers are always E.164 (`+923001234567`). The server re-normalizes and rejects
   anything it can't parse (`400 {"error":"invalid_phone"}`).
 - Auth: `Authorization: Bearer <token>` on every route except `/health`,
-  `POST /v1/register` and `GET /downloads/*`.
+  `POST /v1/register`, `POST /v1/privacy-requests` and `GET /downloads/*`.
 - Errors: non-2xx with `{"error": "<snake_case_code>", "message": "<human text>"}`.
 
 ## Joining
@@ -205,6 +205,16 @@ the app cannot fetch is ignored. The full row stays on the server, visible only 
   { "phones": [Lookup], "urls": [ { "url": "https://...", "reports": 3, "label": "likely_scam" } ], "verdict": "safe" | "unknown" | "suspicious" | "scam" }
   ```
 - `POST /v1/reports/url` `{ "url" }` → `{ "url", "reports", "label" }`
+
+## Privacy requests (public, for a website form)
+
+### `POST /v1/privacy-requests`
+
+`{"kind": "account" | "remove", "phone": "+923001234567", "email": "you@example.com"}` → `202 {"ok": true}`.
+Five per IP per hour. Nothing is deleted at this point: the operator checks the number belongs to
+the requester, then runs `node dist/cli/privacy.js apply <id>`. `account` deletes that member;
+`remove` (for people who don't use the app) deletes every shared name for the number and ignores
+future uploads of it. One pending request per kind and number; a repeat updates the email.
 
 ## App updates (no Play Store)
 

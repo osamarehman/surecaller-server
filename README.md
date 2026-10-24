@@ -221,6 +221,23 @@ hops, e.g. `2` for Cloudflare in front of Caddy. Do not use `TRUST_PROXY=true`: 
 `X-Forwarded-For` hop, so any client can forge its IP and dodge the per-IP limits (the server
 logs a warning at start when it is set).
 
+## Website and deletion requests (optional)
+
+Put a static site in `site/` (or set `SITE_DIR`) and mount it at `/app/site`. When it holds an
+`index.html`, the server serves it at `/`, and `/privacy` serves `privacy.html` and so on. Without
+it, `/` keeps redirecting to the newest APK. `/download` always does.
+
+App stores want a web page where people can ask to delete their account. Point a form at
+`POST /v1/privacy-requests` (see `docs/API.md`), then handle the requests:
+
+```bash
+docker compose exec api node dist/cli/privacy.js              # list pending requests
+docker compose exec api node dist/cli/privacy.js apply <id>   # after checking the number is theirs
+docker compose exec api node dist/cli/privacy.js reject <id>
+```
+
+New requests also show in the logs as `privacy request received`.
+
 ## Push notifications (optional)
 
 Without Firebase, the app gets family alerts and SOS by polling. For instant push:

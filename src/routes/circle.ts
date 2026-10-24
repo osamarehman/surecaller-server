@@ -149,6 +149,7 @@ export async function circleRoutes(app: FastifyInstance) {
         await c.query(
           `INSERT INTO contacts (user_id, phone_hash, name_enc)
            SELECT $1, h, e FROM unnest($2::bytea[], $3::bytea[]) AS t(h, e)
+           WHERE NOT EXISTS (SELECT 1 FROM opt_outs o WHERE o.phone_hash = t.h)
            ON CONFLICT (user_id, phone_hash) DO UPDATE SET name_enc = EXCLUDED.name_enc, updated_at = now()`,
           [req.user.id, hashes, sealed],
         );

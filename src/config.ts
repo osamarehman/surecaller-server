@@ -18,6 +18,8 @@ export interface Config {
   publicUrl: string | null;
   fcmServiceAccount: string | null;
   downloadsDir: string;
+  /** Optional static website; served at `/` when it holds an index.html. */
+  siteDir: string;
   lookupRateLimit: number;
   registerRateLimit: number;
   /** Distinct numbers per member per minute across all batch lookups. */
@@ -104,6 +106,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     publicUrl: process.env.PUBLIC_URL?.trim().replace(/\/+$/, '') || null,
     fcmServiceAccount: process.env.FCM_SERVICE_ACCOUNT?.trim() || null,
     downloadsDir: path.resolve(ROOT_DIR, process.env.DOWNLOADS_DIR ?? 'downloads'),
+    siteDir: path.resolve(ROOT_DIR, process.env.SITE_DIR ?? 'site'),
     lookupRateLimit: Math.max(1, intEnv('LOOKUP_RATE_LIMIT', 120)),
     registerRateLimit: Math.max(1, intEnv('REGISTER_RATE_LIMIT', 10)),
     batchLookupRateLimit: Math.max(1, intEnv('BATCH_LOOKUP_RATE_LIMIT', 300)),

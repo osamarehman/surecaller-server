@@ -17,6 +17,12 @@ const RegisterBody = z.object({
   deviceName: z.string().trim().max(100).nullish(),
 });
 
+const PrivacyRequestBody = z.object({
+  kind: z.enum(['account', 'remove']),
+  phone: z.string().max(40),
+  email: z.string().trim().email().max(200),
+});
+
 const invalidCode = () => new AppError(403, 'invalid_code', 'Invite or admin code is not valid');
 
 export async function publicRoutes(app: FastifyInstance) {
@@ -130,6 +136,24 @@ export async function publicRoutes(app: FastifyInstance) {
 
       const user = await getUser(pool, userId);
       return reply.status(201).send({ token, user: toUser(user!) });
+    },
+  );
+
+  // From the website's delete page. Nothing is deleted here: the operator checks the number
+  // belongs to the requester, then applies it with src/cli/privacy.ts.
+  app.post(
+    '/v1/privacy-requests',
+    { bodyLimit: 1024, config: { rateLimit: { max: 5, timeWindow: '1 hour' } } },
+    async (req, reply) => {
+      const b = parse(PrivacyRequestBody, req.body);
+      const phone = requirePhone(b.phone, cfg.defaultRegion);
+      await pool.query(
+        `INSERT INTO privacy_requests (kind, phone, email) VALUES ($1, $2, $3)
+         ON CONFLICT (kind, phone) DO UPDATE SET email = EXCLUDED.email, created_at = now()`,
+        [b.kind, phone, b.email],
+      );
+      req.log.warn({ kind: b.kind, phone: maskPhone(phone) }, 'privacy request received: run dist/cli/privacy.js');
+      return reply.status(202).send({ ok: true });
     },
   );
 

@@ -94,7 +94,8 @@ export async function lookupRoutes(app: FastifyInstance) {
     const b = parse(NameBody, req.body);
     const phone = requirePhone(b.phone, cfg.defaultRegion);
     await pool.query(
-      `INSERT INTO name_suggestions (user_id, phone_hash, name_enc) VALUES ($1, $2, $3)
+      `INSERT INTO name_suggestions (user_id, phone_hash, name_enc)
+       SELECT $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM opt_outs WHERE phone_hash = $2)
        ON CONFLICT (user_id, phone_hash) DO UPDATE SET name_enc = EXCLUDED.name_enc, created_at = now()`,
       [req.user.id, vault().index(phone), vault().seal(phone, b.name)],
     );

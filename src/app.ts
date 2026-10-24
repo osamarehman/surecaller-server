@@ -113,7 +113,9 @@ export async function buildApp(cfg: Config, pool: pg.Pool, notifier?: Notifier):
     const apk = await latestApk();
     if (apk && apk !== m[1]) return toLatest(reply, apk);
   });
-  for (const url of ['/', '/download']) {
+  // With a website in SITE_DIR, `/` is its home page; without one, `/` is an install link.
+  const hasSite = fs.existsSync(path.join(cfg.siteDir, 'index.html'));
+  for (const url of hasSite ? ['/download'] : ['/', '/download']) {
     app.get(url, async (_req, reply) => {
       const apk = await latestApk();
       if (!apk) throw new AppError(404, 'not_found', 'No app release published yet');
@@ -128,6 +130,17 @@ export async function buildApp(cfg: Config, pool: pg.Pool, notifier?: Notifier):
     list: false,
     dotfiles: 'deny',
   });
+
+  if (hasSite) {
+    await app.register(fastifyStatic, {
+      root: cfg.siteDir,
+      prefix: '/',
+      decorateReply: false,
+      extensions: ['html'], // /privacy -> privacy.html
+      list: false,
+      dotfiles: 'deny',
+    });
+  }
 
   await app.register(publicRoutes);
   await app.register(telemetryIngestRoutes);
