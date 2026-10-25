@@ -32,7 +32,18 @@ says which. Server-wide admin routes (`GET /v1/telemetry`) are for admins of the
 **Email.** Each account can have one verified email (one account per email). With
 `EMAIL_VERIFICATION=required` on the server, every new account needs one. The app first calls
 `POST /v1/email-codes`, the user types the 6-digit code from the email, and the app sends
-`email` + `emailCode` with `POST /v1/register`. The same pair also signs an existing member in on
+`email` + `emailCode` with `POST /v1/register`.
+
+**Sign in with Google** proves the email in one tap and is the preferred path: the app gets a
+Google ID token (Credential Manager, `serverClientId` = the server's web client ID in
+`GOOGLE_CLIENT_IDS`) and sends `googleIdToken` instead of `email` + `emailCode`. The server checks
+the signature, the audience and `email_verified`, and uses the token's email. Keep the email code
+as the fallback for phones without Google Play services. Both prove the same thing, so an account
+made with Google can later sign in with an email code to the same address, and the other way round.
+Errors: `403 invalid_google_token`, `503 google_unavailable` (server has no `GOOGLE_CLIENT_IDS`),
+`400 invalid_request` when a request sends both kinds of proof.
+
+Either proof also signs an existing member in on
 a new phone without an admin (open sign-up path, no `code`), as long as the email matches the
 account's. The email is shown only to its owner (`GET /v1/me`), never to other members.
 
@@ -59,6 +70,7 @@ Invites (admins, or up to 5 per member):
   "email": "ali@example.com", "emailCode": "482913" }
 ```
 `email` and `emailCode` are optional unless the server requires email, and always go together.
+`googleIdToken` can replace them (see Email above).
 → `201`
 ```json
 { "token": "<opaque, 64 hex chars>", "user": User }
@@ -109,7 +121,7 @@ Errors:
 
 - `GET /v1/me` → `User` plus `"email"` (string or null)
 - `PATCH /v1/me` body (all optional): `{ "name", "status", "shareContacts", "protection": {...}, "fcmToken" }` → `User`.
-  To add or change the email, send `"email"` with an `"emailCode"` from `POST /v1/email-codes`
+  To add or change the email, send `"googleIdToken"`, or `"email"` with an `"emailCode"` from `POST /v1/email-codes`
   (`403 invalid_email_code`, `409 email_taken`). Existing accounts use this to add a recovery email.
 - `DELETE /v1/me` → `204`. Deletes the user, their shared contacts, reports and token.
   `409 last_admin` if the caller is the only admin and other members remain (make someone

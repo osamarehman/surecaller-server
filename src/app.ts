@@ -8,6 +8,7 @@ import type { Config } from './config.js';
 import { AppError, badRequest, tooManyRequests } from './errors.js';
 import { createNotifier, type Notifier } from './fcm.js';
 import { authenticate } from './http.js';
+import { createGoogleVerifier, type GoogleVerifier } from './email.js';
 import { createMailer, type Mailer } from './mail.js';
 import { initVault } from './vault.js';
 import type { UserRow } from './users.js';
@@ -28,6 +29,7 @@ export async function buildApp(
   pool: pg.Pool,
   notifier?: Notifier,
   mailer?: Mailer,
+  google?: GoogleVerifier,
 ): Promise<FastifyInstance> {
   const app = Fastify({
     logger: cfg.logLevel === 'silent' ? false : { level: cfg.logLevel },
@@ -52,6 +54,7 @@ export async function buildApp(
         await pool.query('UPDATE users SET fcm_token = NULL WHERE fcm_token = $1', [token]);
       }),
     mailer: mailer ?? createMailer(cfg.smtpUrl, cfg.mailFrom, app.log),
+    google: google ?? createGoogleVerifier(cfg.googleClientIds),
   });
   app.decorateRequest('user', null as unknown as UserRow);
 

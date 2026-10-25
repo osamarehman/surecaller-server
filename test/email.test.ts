@@ -137,4 +137,41 @@ describe('email verification', () => {
     const members = await api(h, 'GET', '/v1/members', a.token);
     expect(members.body.members[0].email).toBeUndefined();
   });
+
+  it('a Google account proves the email, for sign-up, a new phone and adding it later', async () => {
+    const r = await api(h, 'POST', '/v1/register', null, {
+      phone: '+923001110006',
+      name: 'G',
+      googleIdToken: 'google:G@gmail.com',
+    });
+    expect(r.status).toBe(201);
+    expect(r.body.user.email).toBe('g@gmail.com');
+
+    const bad = await api(h, 'POST', '/v1/register', null, { phone: '+923001110006', googleIdToken: 'forged' });
+    expect(bad.status).toBe(403);
+    expect(bad.body.error).toBe('invalid_google_token');
+    const both = await api(h, 'POST', '/v1/register', null, {
+      phone: '+923001110006',
+      googleIdToken: 'google:g@gmail.com',
+      email: 'g@gmail.com',
+      emailCode: '123456',
+    });
+    expect(both.status).toBe(400);
+
+    // Another Google account can't take the number; the right one signs back in.
+    const other = await api(h, 'POST', '/v1/register', null, { phone: '+923001110006', googleIdToken: 'google:x@gmail.com' });
+    expect(other.status).toBe(409);
+    const back = await api(h, 'POST', '/v1/register', null, { phone: '+923001110006', googleIdToken: 'google:g@gmail.com' });
+    expect(back.status).toBe(201);
+    expect(back.body.user.id).toBe(r.body.user.id);
+
+    // The same email works either way: an email code for a Google-made account is the same account.
+    const code = await getCode('g@gmail.com');
+    const viaCode = await api(h, 'POST', '/v1/register', null, { phone: '+923001110006', email: 'g@gmail.com', emailCode: code });
+    expect(viaCode.body.user.id).toBe(r.body.user.id);
+
+    const p = await api(h, 'PATCH', '/v1/me', viaCode.body.token, { googleIdToken: 'google:new@gmail.com' });
+    expect(p.status).toBe(200);
+    expect(p.body.email).toBe('new@gmail.com');
+  });
 });

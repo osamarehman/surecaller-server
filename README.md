@@ -143,7 +143,7 @@ after a recovery or a suspected leak. Each such re-registration is logged with a
 **Open sign-up.** Registration needs no invite code: anyone who installs the app can create an
 account with just a name and number, and starts a family of their own. Every user gets the shared
 caller ID, which is fed by the trusted family's synced contacts and spam reports. There is **no proof of number ownership**
-(no SMS code), so a number can be squatted by someone else. Set `SMTP_URL` and
+(no SMS code), so a number can be squatted by someone else. Set `SMTP_URL` (email codes) and/or `GOOGLE_CLIENT_IDS` (Sign in with Google), and
 `EMAIL_VERIFICATION=required` to make every new account verify an email (one account per email),
 which slows down mass sign-ups and lets members sign back in on a new phone with their email.
 Sign-ups are also limited by the per-IP `REGISTER_RATE_LIMIT`. An existing number can never be

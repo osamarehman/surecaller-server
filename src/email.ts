@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
+import { OAuth2Client } from 'google-auth-library';
 import { z } from 'zod';
 import type { Client } from './db.js';
-import { AppError } from './errors.js';
+import { AppError, badRequest } from './errors.js';
 import { hashToken, safeEqual } from './tokens.js';
 
 export const Email = z
@@ -51,3 +52,47 @@ export const spendEmailCode = (db: Client, email: string) =>
 export const isEmailTaken = (e: unknown) =>
   (e as { code?: string; constraint?: string }).code === '23505' &&
   (e as { constraint?: string }).constraint === 'users_email_unique';
+
+/** Returns the verified email in a Google ID token, or null if the token doesn't check out. */
+export type GoogleVerifier = (idToken: string) => Promise<string | null>;
+
+/** Checks Google ID tokens from the app's "Sign in with Google". audiences = the OAuth web client IDs. */
+export function createGoogleVerifier(audiences: string[]): GoogleVerifier | null {
+  if (!audiences.length) return null;
+  const client = new OAuth2Client();
+  return async (idToken) => {
+    try {
+      const p = (await client.verifyIdToken({ idToken, audience: audiences })).getPayload();
+      return p?.email && p.email_verified ? p.email.toLowerCase() : null;
+    } catch {
+      return null; // ponytail: Google cert fetch failures also land here; split them out if they show up
+    }
+  };
+}
+
+export const EmailProof = {
+  email: Email.optional(),
+  emailCode: z.string().max(20).optional(),
+  googleIdToken: z.string().max(4096).optional(),
+};
+
+/**
+ * The email a request proves, from a Google ID token or an email code; null when it sends neither.
+ * An email code counts one try on the pool (see checkEmailCode); spend it in the caller's transaction.
+ */
+export async function proveEmail(
+  ctx: { pool: Client; google: GoogleVerifier | null },
+  b: { email?: string; emailCode?: string; googleIdToken?: string },
+): Promise<string | null> {
+  if (b.googleIdToken) {
+    if (b.email || b.emailCode) throw badRequest('invalid_request', 'Send googleIdToken or email + emailCode, not both');
+    if (!ctx.google) throw new AppError(503, 'google_unavailable', 'This server has no Google sign-in');
+    const email = await ctx.google(b.googleIdToken);
+    if (!email) throw new AppError(403, 'invalid_google_token', 'Google sign-in could not be verified');
+    return email;
+  }
+  if (!b.email !== !b.emailCode) throw badRequest('invalid_request', 'email and emailCode go together');
+  if (!b.email) return null;
+  await checkEmailCode(ctx.pool, b.email, b.emailCode!);
+  return b.email;
+}

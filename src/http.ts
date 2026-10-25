@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { Config } from './config.js';
 import { badRequest, forbidden, unauthorized } from './errors.js';
 import type { Notifier } from './fcm.js';
+import type { GoogleVerifier } from './email.js';
 import type { Mailer } from './mail.js';
 import { hashToken } from './tokens.js';
 import type { UserRow } from './users.js';
@@ -13,6 +14,7 @@ export interface Ctx {
   pool: pg.Pool;
   notifier: Notifier;
   mailer: Mailer;
+  google: GoogleVerifier | null;
 }
 
 declare module 'fastify' {

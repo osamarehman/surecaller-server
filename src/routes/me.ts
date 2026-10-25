@@ -4,8 +4,8 @@ import { z } from 'zod';
 import { lockCircle, withTx } from '../db.js';
 import { parse } from '../http.js';
 import { refreshSpamForUser } from '../lookup.js';
-import { checkEmailCode, Email, isEmailTaken, spendEmailCode } from '../email.js';
-import { badRequest, conflict, notFound } from '../errors.js';
+import { EmailProof, isEmailTaken, proveEmail, spendEmailCode } from '../email.js';
+import { conflict, notFound } from '../errors.js';
 import { assertKeepsAnAdmin, getUser, toMe } from '../users.js';
 
 const PatchMe = z.object({
@@ -20,9 +20,8 @@ const PatchMe = z.object({
     })
     .optional(),
   fcmToken: z.string().max(4096).nullable().optional(),
-  // Adds or changes the account's email, with a code from POST /v1/email-codes.
-  email: Email.optional(),
-  emailCode: z.string().max(20).optional(),
+  // Adds or changes the account's email: a Google ID token, or email + a code from POST /v1/email-codes.
+  ...EmailProof,
 });
 
 /**
@@ -59,8 +58,7 @@ export async function meRoutes(app: FastifyInstance) {
 
   app.patch('/me', async (req) => {
     const b = parse(PatchMe, req.body);
-    if (!b.email !== !b.emailCode) throw badRequest('invalid_request', 'email and emailCode go together');
-    if (b.email) await checkEmailCode(pool, b.email, b.emailCode!);
+    const email = await proveEmail(app.ctx, b);
     await withTx(pool, async (c) => {
       const sets: string[] = [];
       const vals: unknown[] = [req.user.id];
@@ -72,9 +70,9 @@ export async function meRoutes(app: FastifyInstance) {
       if (b.status !== undefined) set('status', b.status || null);
       if (b.shareContacts !== undefined) set('share_contacts', b.shareContacts);
       if (b.fcmToken !== undefined) set('fcm_token', b.fcmToken || null);
-      if (b.email) {
-        set('email', b.email);
-        await spendEmailCode(c, b.email);
+      if (email) {
+        set('email', email);
+        await spendEmailCode(c, email);
       }
       if (b.protection !== undefined) {
         vals.push(JSON.stringify({ ...b.protection, reportedAt: new Date().toISOString() }));

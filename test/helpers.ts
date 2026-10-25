@@ -55,7 +55,9 @@ export async function createHarness(overrides: Partial<Config> = {}): Promise<Ha
       mails.push({ to, subject, text });
     },
   };
-  const app = await buildApp(cfg, pool, notifier, mailer);
+  // Fake Google: a token "google:<email>" proves that email, anything else fails.
+  const google = async (t: string) => (t.startsWith('google:') ? t.slice(7).toLowerCase() : null);
+  const app = await buildApp(cfg, pool, notifier, mailer, google);
   await app.ready();
   return {
     app,

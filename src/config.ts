@@ -47,6 +47,8 @@ export interface Config {
   mailFrom: string;
   /** New accounts must verify an email (EMAIL_VERIFICATION=required). Needs smtpUrl. */
   emailRequired: boolean;
+  /** OAuth web client IDs accepted as the audience of Google ID tokens; empty = no Google sign-in. */
+  googleClientIds: string[];
   /** POST /v1/email-codes requests per IP per hour. */
   emailCodeRateLimit: number;
 }
@@ -73,7 +75,9 @@ export function validateConfig(cfg: Config): Config {
       throw new Error('ADMIN_CODE is still the example value from .env.example; set your own random secret');
     }
   }
-  if (cfg.emailRequired && !cfg.smtpUrl) throw new Error('EMAIL_VERIFICATION=required needs SMTP_URL');
+  if (cfg.emailRequired && !cfg.smtpUrl && !cfg.googleClientIds.length) {
+    throw new Error('EMAIL_VERIFICATION=required needs SMTP_URL or GOOGLE_CLIENT_IDS');
+  }
   return cfg;
 }
 
@@ -130,6 +134,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     smtpUrl: process.env.SMTP_URL?.trim() || null,
     mailFrom: process.env.MAIL_FROM?.trim() || 'SureCaller <noreply@localhost>',
     emailCodeRateLimit: Math.max(1, intEnv('EMAIL_CODE_RATE_LIMIT', 5)),
+    googleClientIds: (process.env.GOOGLE_CLIENT_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
     emailRequired: process.env.EMAIL_VERIFICATION?.trim().toLowerCase() === 'required',
     ...overrides,
   });

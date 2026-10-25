@@ -8,7 +8,7 @@ import { lockCircle, withTx } from '../db.js';
 import { AppError, badRequest, conflict, notFound } from '../errors.js';
 import { maskPhone, requirePhone } from '../phone.js';
 import { canonicalInviteCode, hashToken, newToken, safeEqual } from '../tokens.js';
-import { checkEmailCode, Email, isEmailTaken, issueEmailCode, spendEmailCode } from '../email.js';
+import { Email, EmailProof, isEmailTaken, issueEmailCode, proveEmail, spendEmailCode } from '../email.js';
 import { getUser, toMe, type UserRow } from '../users.js';
 
 const RegisterBody = z.object({
@@ -16,10 +16,9 @@ const RegisterBody = z.object({
   name: z.string().trim().max(60).optional(),
   code: z.string().max(200).optional().default(''),
   deviceName: z.string().trim().max(100).nullish(),
-  // A code from POST /v1/email-codes. Required for new accounts when EMAIL_VERIFICATION=required,
-  // and lets an existing member sign in on a new phone without an admin.
-  email: Email.optional(),
-  emailCode: z.string().max(20).optional(),
+  // A verified email: a Google ID token, or email + a code from POST /v1/email-codes. Required for
+  // new accounts when EMAIL_VERIFICATION=required, and signs an existing member in on a new phone.
+  ...EmailProof,
 });
 
 const EmailCodeBody = z.object({ email: Email });
@@ -58,9 +57,7 @@ export async function publicRoutes(app: FastifyInstance) {
       const phone = requirePhone(body.phone, cfg.defaultRegion);
       const code = body.code.trim();
       const token = newToken();
-      if (!body.email !== !body.emailCode) throw badRequest('invalid_request', 'email and emailCode go together');
-      const email = body.email ?? null;
-      if (email) await checkEmailCode(pool, email, body.emailCode!);
+      const email = await proveEmail(app.ctx, body);
 
       const { userId, adminTakeover } = await withTx(pool, async (c) => {
         if (email) await spendEmailCode(c, email);
