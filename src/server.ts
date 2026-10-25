@@ -53,6 +53,7 @@ async function main() {
         "DELETE FROM telemetry WHERE received_at < now() - make_interval(days => $1)",
         [cfg.telemetryRetentionDays],
       );
+      await pool.query('DELETE FROM email_codes WHERE expires_at < now()');
       if (l.rowCount || e.rowCount || i.rowCount || t.rowCount) {
         log(
           `pruned ${l.rowCount} lookups, ${e.rowCount} events, ${i.rowCount} invites, ${t.rowCount} telemetry rows`,

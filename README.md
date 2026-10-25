@@ -143,10 +143,11 @@ after a recovery or a suspected leak. Each such re-registration is logged with a
 **Open sign-up.** Registration needs no invite code: anyone who installs the app can create an
 account with just a name and number, and starts a family of their own. Every user gets the shared
 caller ID, which is fed by the trusted family's synced contacts and spam reports. There is **no proof of number ownership**
-(no OTP), so a number can be squatted by someone else, and sign-ups are limited only by the
-per-IP `REGISTER_RATE_LIMIT`. This is deliberate for a small, trusted deployment. If the server
-is public, put it behind an allowlist/OTP or keep its URL private. An existing number can never be
-taken over without an admin reset. The admin can still create one-time invite codes
+(no SMS code), so a number can be squatted by someone else. Set `SMTP_URL` and
+`EMAIL_VERIFICATION=required` to make every new account verify an email (one account per email),
+which slows down mass sign-ups and lets members sign back in on a new phone with their email.
+Sign-ups are also limited by the per-IP `REGISTER_RATE_LIMIT`. An existing number can never be
+taken over without its email or an admin reset. The admin can still create one-time invite codes
 (format `K7Q2-9XPM`, valid 72 hours) and, via "Reset device", an invite bound to a member's
 number for a reinstall or new phone.
 

@@ -42,6 +42,13 @@ export interface Config {
   telemetryMaxBytes: number;
   /** Installs asked to also send `debug` events: a set of install ids, or 'all'. */
   telemetryDebugInstalls: ReadonlySet<string> | 'all';
+  /** smtp(s):// URL for sign-up codes; null = no mail. */
+  smtpUrl: string | null;
+  mailFrom: string;
+  /** New accounts must verify an email (EMAIL_VERIFICATION=required). Needs smtpUrl. */
+  emailRequired: boolean;
+  /** POST /v1/email-codes requests per IP per hour. */
+  emailCodeRateLimit: number;
 }
 
 export const MIN_ADMIN_CODE_LENGTH = 12;
@@ -66,6 +73,7 @@ export function validateConfig(cfg: Config): Config {
       throw new Error('ADMIN_CODE is still the example value from .env.example; set your own random secret');
     }
   }
+  if (cfg.emailRequired && !cfg.smtpUrl) throw new Error('EMAIL_VERIFICATION=required needs SMTP_URL');
   return cfg;
 }
 
@@ -119,6 +127,10 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     telemetryMaxRows: Math.max(1, intEnv('TELEMETRY_MAX_ROWS', 2_000_000)),
     telemetryMaxBytes: Math.max(1, intEnv('TELEMETRY_MAX_BYTES', 500 * 1024 * 1024)),
     telemetryDebugInstalls: telemetryDebugEnv(),
+    smtpUrl: process.env.SMTP_URL?.trim() || null,
+    mailFrom: process.env.MAIL_FROM?.trim() || 'SureCaller <noreply@localhost>',
+    emailCodeRateLimit: Math.max(1, intEnv('EMAIL_CODE_RATE_LIMIT', 5)),
+    emailRequired: process.env.EMAIL_VERIFICATION?.trim().toLowerCase() === 'required',
     ...overrides,
   });
 }

@@ -5,6 +5,7 @@ export interface UserRow {
   id: string;
   phone: string;
   name: string;
+  email: string | null;
   family_id: string;
   /** Admin of their own family. */
   is_admin: boolean;
@@ -45,6 +46,9 @@ export function toUser(row: UserRow) {
     lastSeenAt: row.last_seen_at ? row.last_seen_at.toISOString() : null,
   };
 }
+
+/** The signed-in user's own view: adds fields other members don't see. */
+export const toMe = (row: UserRow) => ({ ...toUser(row), email: row.email });
 
 export async function getUser(db: Client, id: string): Promise<UserRow | null> {
   const { rows } = await db.query<UserRow>(`${USER_SELECT} WHERE u.id = $1`, [id]);

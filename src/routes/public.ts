@@ -8,20 +8,33 @@ import { lockCircle, withTx } from '../db.js';
 import { AppError, badRequest, conflict, notFound } from '../errors.js';
 import { maskPhone, requirePhone } from '../phone.js';
 import { canonicalInviteCode, hashToken, newToken, safeEqual } from '../tokens.js';
-import { getUser, toUser, type UserRow } from '../users.js';
+import { checkEmailCode, Email, isEmailTaken, issueEmailCode, spendEmailCode } from '../email.js';
+import { getUser, toMe, type UserRow } from '../users.js';
 
 const RegisterBody = z.object({
   phone: z.string(),
   name: z.string().trim().max(60).optional(),
   code: z.string().max(200).optional().default(''),
   deviceName: z.string().trim().max(100).nullish(),
+  // A code from POST /v1/email-codes. Required for new accounts when EMAIL_VERIFICATION=required,
+  // and lets an existing member sign in on a new phone without an admin.
+  email: Email.optional(),
+  emailCode: z.string().max(20).optional(),
 });
+
+const EmailCodeBody = z.object({ email: Email });
 
 const PrivacyRequestBody = z.object({
   kind: z.enum(['account', 'remove']),
   phone: z.string().max(40),
   email: z.string().trim().email().max(200),
 });
+
+const phoneTaken = () =>
+  conflict(
+    'phone_taken',
+    'This number is already registered; sign in with its email or ask an admin to reset your device',
+  );
 
 const invalidCode = () => new AppError(403, 'invalid_code', 'Invite or admin code is not valid');
 
@@ -45,8 +58,12 @@ export async function publicRoutes(app: FastifyInstance) {
       const phone = requirePhone(body.phone, cfg.defaultRegion);
       const code = body.code.trim();
       const token = newToken();
+      if (!body.email !== !body.emailCode) throw badRequest('invalid_request', 'email and emailCode go together');
+      const email = body.email ?? null;
+      if (email) await checkEmailCode(pool, email, body.emailCode!);
 
       const { userId, adminTakeover } = await withTx(pool, async (c) => {
+        if (email) await spendEmailCode(c, email);
         // Serialize registrations so two people can't both bootstrap as admin.
         await lockCircle(c);
         const existing = (
@@ -92,22 +109,24 @@ export async function publicRoutes(app: FastifyInstance) {
           if (!invite) throw invalidCode();
           // A phone-bound invite only works for that exact phone.
           if (invite.phone !== null && invite.phone !== phone) throw invalidCode();
-          if (invite.phone === null && existing) {
-            throw conflict('phone_taken', 'This number is already registered; ask an admin to reset your device');
-          }
+          if (invite.phone === null && existing) throw phoneTaken();
           // Resetting a device never moves a member into another family.
           if (existing && existing.family_id !== invite.family_id) throw invalidCode();
           await c.query('UPDATE invites SET used_at = now() WHERE code = $1', [invite.code]);
           inviteCode = invite.code;
           familyId = invite.family_id;
         } else {
-          // Open sign-up: no code needed. A brand-new number starts its own family as its admin;
-          // an existing number can't be taken over without an admin reset (anti-hijack).
+          // Open sign-up: no code needed. A brand-new number starts its own family as its admin.
+          // An existing number needs its account's verified email (or an admin reset) to sign in again.
           if (existing) {
-            throw conflict('phone_taken', 'This number is already registered; ask an admin to reset your device');
+            if (!email || existing.email !== email) throw phoneTaken();
+          } else {
+            familyId = await newFamily(false);
+            makeAdmin = true;
           }
-          familyId = await newFamily(false);
-          makeAdmin = true;
+        }
+        if (!existing && cfg.emailRequired && !email) {
+          throw badRequest('email_required', 'Verify an email address to create an account');
         }
 
         let id: string;
@@ -115,22 +134,24 @@ export async function publicRoutes(app: FastifyInstance) {
           await c.query(
             `UPDATE users SET token_hash = $2, device_name = coalesce($3, device_name),
                name = coalesce(nullif($4, ''), name), is_admin = is_admin OR $5,
-               fcm_token = NULL, last_seen_at = now()
+               fcm_token = NULL, last_seen_at = now(), email = coalesce($6, email)
              WHERE id = $1`,
-            [existing.id, hashToken(token), body.deviceName ?? null, body.name ?? null, makeAdmin],
+            [existing.id, hashToken(token), body.deviceName ?? null, body.name ?? null, makeAdmin, email],
           );
           id = existing.id;
         } else {
           if (!body.name) throw badRequest('invalid_request', 'name: required');
           const { rows } = await c.query<{ id: string }>(
-            `INSERT INTO users (phone, name, is_admin, family_id, device_name, token_hash, last_seen_at)
-             VALUES ($1, $2, $3, $4, $5, $6, now()) RETURNING id`,
-            [phone, body.name, makeAdmin, familyId, body.deviceName ?? null, hashToken(token)],
+            `INSERT INTO users (phone, name, is_admin, family_id, device_name, token_hash, last_seen_at, email)
+             VALUES ($1, $2, $3, $4, $5, $6, now(), $7) RETURNING id`,
+            [phone, body.name, makeAdmin, familyId, body.deviceName ?? null, hashToken(token), email],
           );
           id = rows[0].id;
         }
         if (inviteCode) await c.query('UPDATE invites SET used_by = $2 WHERE code = $1', [inviteCode, id]);
         return { userId: id, adminTakeover };
+      }).catch((e) => {
+        throw isEmailTaken(e) ? conflict('email_taken', 'This email is already used by another account') : e;
       });
 
       // Audit trail for the master credential: logged after commit so a rolled-back attempt
@@ -149,7 +170,31 @@ export async function publicRoutes(app: FastifyInstance) {
       }
 
       const user = await getUser(pool, userId);
-      return reply.status(201).send({ token, user: toUser(user!) });
+      return reply.status(201).send({ token, user: toMe(user!) });
+    },
+  );
+
+  // Emails a 6-digit sign-up code. Same answer whether or not the email has an account.
+  app.post(
+    '/v1/email-codes',
+    { bodyLimit: 1024, config: { rateLimit: { max: cfg.emailCodeRateLimit, timeWindow: '1 hour' } } },
+    async (req, reply) => {
+      const { email } = parse(EmailCodeBody, req.body);
+      if (!app.ctx.mailer.enabled) throw new AppError(503, 'email_unavailable', 'This server cannot send email');
+      const code = await issueEmailCode(pool, email);
+      if (!code) throw new AppError(429, 'rate_limited', 'Wait a minute before asking for another code');
+      try {
+        await app.ctx.mailer.send(
+          email,
+          `Your SureCaller code: ${code}`,
+          `Your SureCaller code is ${code}. It expires in 15 minutes.\n\nIf you didn't ask for it, ignore this email.`,
+        );
+      } catch (err) {
+        await spendEmailCode(pool, email);
+        req.log.error({ err }, 'sending the email code failed');
+        throw new AppError(503, 'email_failed', 'Could not send the email, try again later');
+      }
+      return reply.status(202).send({ ok: true });
     },
   );
 

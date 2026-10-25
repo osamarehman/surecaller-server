@@ -2,10 +2,11 @@ import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { z } from 'zod';
 import { lockCircle, withTx } from '../db.js';
-import { notFound } from '../errors.js';
 import { parse } from '../http.js';
 import { refreshSpamForUser } from '../lookup.js';
-import { assertKeepsAnAdmin, getUser, toUser } from '../users.js';
+import { checkEmailCode, Email, isEmailTaken, spendEmailCode } from '../email.js';
+import { badRequest, conflict, notFound } from '../errors.js';
+import { assertKeepsAnAdmin, getUser, toMe } from '../users.js';
 
 const PatchMe = z.object({
   name: z.string().trim().min(1).max(60).optional(),
@@ -19,6 +20,9 @@ const PatchMe = z.object({
     })
     .optional(),
   fcmToken: z.string().max(4096).nullable().optional(),
+  // Adds or changes the account's email, with a code from POST /v1/email-codes.
+  email: Email.optional(),
+  emailCode: z.string().max(20).optional(),
 });
 
 /**
@@ -51,10 +55,12 @@ export async function deleteMember(pool: pg.Pool, userId: string, threshold: num
 export async function meRoutes(app: FastifyInstance) {
   const { cfg, pool } = app.ctx;
 
-  app.get('/me', async (req) => toUser((await getUser(pool, req.user.id))!));
+  app.get('/me', async (req) => toMe((await getUser(pool, req.user.id))!));
 
   app.patch('/me', async (req) => {
     const b = parse(PatchMe, req.body);
+    if (!b.email !== !b.emailCode) throw badRequest('invalid_request', 'email and emailCode go together');
+    if (b.email) await checkEmailCode(pool, b.email, b.emailCode!);
     await withTx(pool, async (c) => {
       const sets: string[] = [];
       const vals: unknown[] = [req.user.id];
@@ -66,6 +72,10 @@ export async function meRoutes(app: FastifyInstance) {
       if (b.status !== undefined) set('status', b.status || null);
       if (b.shareContacts !== undefined) set('share_contacts', b.shareContacts);
       if (b.fcmToken !== undefined) set('fcm_token', b.fcmToken || null);
+      if (b.email) {
+        set('email', b.email);
+        await spendEmailCode(c, b.email);
+      }
       if (b.protection !== undefined) {
         vals.push(JSON.stringify({ ...b.protection, reportedAt: new Date().toISOString() }));
         sets.push(`protection = protection || $${vals.length}::jsonb`);
@@ -73,8 +83,10 @@ export async function meRoutes(app: FastifyInstance) {
       if (sets.length) await c.query(`UPDATE users SET ${sets.join(', ')} WHERE id = $1`, vals);
       // Turning sharing off removes what was shared.
       if (b.shareContacts === false) await c.query('DELETE FROM contacts WHERE user_id = $1', [req.user.id]);
+    }).catch((e) => {
+      throw isEmailTaken(e) ? conflict('email_taken', 'This email is already used by another account') : e;
     });
-    return toUser((await getUser(pool, req.user.id))!);
+    return toMe((await getUser(pool, req.user.id))!);
   });
 
   app.delete('/me', async (req, reply) => {

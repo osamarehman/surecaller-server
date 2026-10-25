@@ -8,7 +8,7 @@ sign-ups. Everything below is the contract between the Android app and the backe
 - Phone numbers are always E.164 (`+923001234567`). The server re-normalizes and rejects
   anything it can't parse (`400 {"error":"invalid_phone"}`).
 - Auth: `Authorization: Bearer <token>` on every route except `/health`,
-  `POST /v1/register`, `POST /v1/privacy-requests` and `GET /downloads/*`.
+  `POST /v1/register`, `POST /v1/email-codes`, `POST /v1/privacy-requests` and `GET /downloads/*`.
 - Errors: non-2xx with `{"error": "<snake_case_code>", "message": "<human text>"}`.
 
 ## Joining
@@ -29,6 +29,22 @@ Only **trusted** families add to what everyone sees: contact sync, spam reports,
 suggestions and link reports return `403 forbidden` for everyone else. `isTrusted` on a `User`
 says which. Server-wide admin routes (`GET /v1/telemetry`) are for admins of the trusted family.
 
+**Email.** Each account can have one verified email (one account per email). With
+`EMAIL_VERIFICATION=required` on the server, every new account needs one. The app first calls
+`POST /v1/email-codes`, the user types the 6-digit code from the email, and the app sends
+`email` + `emailCode` with `POST /v1/register`. The same pair also signs an existing member in on
+a new phone without an admin (open sign-up path, no `code`), as long as the email matches the
+account's. The email is shown only to its owner (`GET /v1/me`), never to other members.
+
+### `POST /v1/email-codes`
+```json
+{ "email": "ali@example.com" }
+```
+→ `202 {"ok": true}`. Emails a 6-digit code, valid 15 minutes, 5 tries. The answer is the same
+whether or not the email has an account. Errors: `429 rate_limited` (a code was sent under a
+minute ago, or more than `EMAIL_CODE_RATE_LIMIT` requests per IP per hour, default 5),
+`503 email_unavailable` (server has no `SMTP_URL`), `503 email_failed` (sending failed).
+
 Invites (admins, or up to 5 per member):
 
 - **Plain invite** (`POST /v1/invites` without `phone`): joins a number that is *not* a
@@ -39,8 +55,10 @@ Invites (admins, or up to 5 per member):
 
 ### `POST /v1/register`
 ```json
-{ "phone": "+923001234567", "name": "Ali", "code": "K7Q2-9XPM", "deviceName": "Pixel 8" }
+{ "phone": "+923001234567", "name": "Ali", "code": "K7Q2-9XPM", "deviceName": "Pixel 8",
+  "email": "ali@example.com", "emailCode": "482913" }
 ```
+`email` and `emailCode` are optional unless the server requires email, and always go together.
 → `201`
 ```json
 { "token": "<opaque, 64 hex chars>", "user": User }
@@ -49,6 +67,7 @@ Invites (admins, or up to 5 per member):
 
 Re-registering an existing member's phone replaces that user's token (the old device is
 signed out and its FCM token cleared) and keeps their id, name and admin role. Allowed only with:
+- the account's verified email and a fresh code (no `code`), or
 - a phone-bound invite for that phone, or
 - `ADMIN_CODE`, and only when that phone is an existing **admin** (or no admin exists yet).
 
@@ -65,7 +84,12 @@ Errors:
 - `409 phone_taken`: a plain invite used for a phone that is already a member. The code is
   **not** consumed. App: tell the user "This number is already in the circle; ask an admin
   to reset your device."
+- `403 invalid_email_code`: wrong, used or expired email code, or 5 wrong tries.
+- `409 phone_taken` also for open sign-up of an existing number without its email.
+- `409 email_taken`: the email belongs to another account.
+- `400 email_required`: the server requires email and this is a new account.
 - `400 invalid_phone`, `400 invalid_request` (e.g. `name: required` for a new member).
+- `User` in the response also has `email` (string or null).
 - `429 rate_limited`: `REGISTER_RATE_LIMIT` attempts per client IP per minute (default 10).
 
 ### `User`
@@ -83,8 +107,10 @@ Errors:
 
 ## Me
 
-- `GET /v1/me` → `User`
-- `PATCH /v1/me` body (all optional): `{ "name", "status", "shareContacts", "protection": {...}, "fcmToken" }` → `User`
+- `GET /v1/me` → `User` plus `"email"` (string or null)
+- `PATCH /v1/me` body (all optional): `{ "name", "status", "shareContacts", "protection": {...}, "fcmToken" }` → `User`.
+  To add or change the email, send `"email"` with an `"emailCode"` from `POST /v1/email-codes`
+  (`403 invalid_email_code`, `409 email_taken`). Existing accounts use this to add a recovery email.
 - `DELETE /v1/me` → `204`. Deletes the user, their shared contacts, reports and token.
   `409 last_admin` if the caller is the only admin and other members remain (make someone
   else admin first).

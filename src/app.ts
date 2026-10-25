@@ -8,6 +8,7 @@ import type { Config } from './config.js';
 import { AppError, badRequest, tooManyRequests } from './errors.js';
 import { createNotifier, type Notifier } from './fcm.js';
 import { authenticate } from './http.js';
+import { createMailer, type Mailer } from './mail.js';
 import { initVault } from './vault.js';
 import type { UserRow } from './users.js';
 import { publicRoutes } from './routes/public.js';
@@ -22,7 +23,12 @@ import { telemetryAdminRoutes, telemetryIngestRoutes } from './routes/telemetry.
 // 20 000 contacts at ~100 bytes each is ~2 MB; leave generous headroom.
 const BODY_LIMIT = 10 * 1024 * 1024;
 
-export async function buildApp(cfg: Config, pool: pg.Pool, notifier?: Notifier): Promise<FastifyInstance> {
+export async function buildApp(
+  cfg: Config,
+  pool: pg.Pool,
+  notifier?: Notifier,
+  mailer?: Mailer,
+): Promise<FastifyInstance> {
   const app = Fastify({
     logger: cfg.logLevel === 'silent' ? false : { level: cfg.logLevel },
     // Keep looked-up phone numbers out of the logs.
@@ -45,6 +51,7 @@ export async function buildApp(cfg: Config, pool: pg.Pool, notifier?: Notifier):
       createNotifier(cfg.fcmServiceAccount, app.log, async (token) => {
         await pool.query('UPDATE users SET fcm_token = NULL WHERE fcm_token = $1', [token]);
       }),
+    mailer: mailer ?? createMailer(cfg.smtpUrl, cfg.mailFrom, app.log),
   });
   app.decorateRequest('user', null as unknown as UserRow);
 

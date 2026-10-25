@@ -7,6 +7,7 @@ import { inject } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { loadConfig, type Config } from '../src/config.js';
 import type { Notifier } from '../src/fcm.js';
+import type { Mailer } from '../src/mail.js';
 import { migrate } from '../src/migrate.js';
 
 export const ADMIN_CODE = 'test-admin-code';
@@ -16,6 +17,7 @@ export interface Harness {
   pool: pg.Pool;
   cfg: Config;
   sent: { tokens: string[]; data: Record<string, string> }[];
+  mails: { to: string; subject: string; text: string }[];
   close(): Promise<void>;
 }
 
@@ -31,13 +33,14 @@ export async function createHarness(overrides: Partial<Config> = {}): Promise<Ha
     downloadsDir,
     lookupRateLimit: 1000,
     registerRateLimit: 1000,
+    emailCodeRateLimit: 1000,
     logLevel: 'silent',
     ...overrides,
   });
   const pool = new pg.Pool({ connectionString: cfg.databaseUrl, max: 10 });
   await migrate(pool);
   await pool.query(`TRUNCATE families, users, invites, contacts, reports, name_suggestions, lookups,
-    spam_state, blocks, events, url_reports, telemetry RESTART IDENTITY CASCADE`);
+    spam_state, blocks, events, url_reports, telemetry, email_codes RESTART IDENTITY CASCADE`);
   const sent: Harness['sent'] = [];
   const notifier: Notifier = {
     enabled: true,
@@ -45,13 +48,21 @@ export async function createHarness(overrides: Partial<Config> = {}): Promise<Ha
       sent.push({ tokens, data });
     },
   };
-  const app = await buildApp(cfg, pool, notifier);
+  const mails: Harness['mails'] = [];
+  const mailer: Mailer = {
+    enabled: true,
+    send: async (to, subject, text) => {
+      mails.push({ to, subject, text });
+    },
+  };
+  const app = await buildApp(cfg, pool, notifier, mailer);
   await app.ready();
   return {
     app,
     pool,
     cfg,
     sent,
+    mails,
     async close() {
       await app.close();
       await pool.end();
