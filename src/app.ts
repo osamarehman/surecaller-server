@@ -20,6 +20,7 @@ import { syncRoutes } from './routes/sync.js';
 import { eventRoutes } from './routes/events.js';
 import { checkRoutes } from './routes/check.js';
 import { telemetryAdminRoutes, telemetryIngestRoutes } from './routes/telemetry.js';
+import { feedbackAdminRoutes, feedbackPublicRoutes } from './routes/feedback.js';
 
 // 20 000 contacts at ~100 bytes each is ~2 MB; leave generous headroom.
 const BODY_LIMIT = 10 * 1024 * 1024;
@@ -154,6 +155,7 @@ export async function buildApp(
 
   await app.register(publicRoutes);
   await app.register(telemetryIngestRoutes);
+  await app.register(feedbackPublicRoutes);
   await app.register(async (v1) => {
     v1.addHook('onRequest', authenticate);
     await v1.register(meRoutes);
@@ -163,6 +165,7 @@ export async function buildApp(
     await v1.register(eventRoutes);
     await v1.register(checkRoutes);
     await v1.register(telemetryAdminRoutes);
+    await v1.register(feedbackAdminRoutes);
   }, { prefix: '/v1' });
 
   return app;
