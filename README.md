@@ -41,9 +41,10 @@ must share your changes with them under the same licence.
   `TELEMETRY_RETENTION_DAYS` (14 by default). The app masks phone numbers before sending them.
 - **Family data stays in the family.** Every user belongs to one family: sign up without a code
   to start your own, or use an invite to join one. Members, alerts, SOS locations and the block
-  list never cross families. Only the trusted family (the operator's, set up with `ADMIN_CODE`)
-  adds to the shared caller-ID names and spam labels, and contacts shared before open sign-up
-  only answer that family's lookups.
+  list never cross families. Every user adds to the shared caller-ID names and spam
+  labels, with per-user rate limits. The trusted family (the operator's, set up with
+  `ADMIN_CODE`) keeps the server-wide admin routes, and its admins' spam reports count on their
+  own. Contacts shared before open sign-up only answer that family's lookups.
 
 ## Contributing
 
@@ -142,7 +143,7 @@ after a recovery or a suspected leak. Each such re-registration is logged with a
 
 **Open sign-up.** Registration needs no invite code: anyone who installs the app can create an
 account with just a name and number, and starts a family of their own. Every user gets the shared
-caller ID, which is fed by the trusted family's synced contacts and spam reports. There is **no proof of number ownership**
+caller ID, which every user feeds with their synced contacts and spam reports. There is **no proof of number ownership**
 (no SMS code), so a number can be squatted by someone else. Set `SMTP_URL` (email codes) and/or `GOOGLE_CLIENT_IDS` (Sign in with Google), and
 `EMAIL_VERIFICATION=required` to make every new account verify an email (one account per email),
 which slows down mass sign-ups and lets members sign back in on a new phone with their email.

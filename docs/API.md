@@ -25,9 +25,13 @@ Registration is **open**: `POST /v1/register` with no `code` creates a brand-new
 account in a new family of its own, with the user as its admin (an existing number still needs a
 reset, see below). An invite code joins the inviter's family.
 
-Only **trusted** families add to what everyone sees: contact sync, spam reports, name
-suggestions and link reports return `403 forbidden` for everyone else. `isTrusted` on a `User`
-says which. Server-wide admin routes (`GET /v1/telemetry`) are for admins of the trusted family.
+Every user has the same features: everyone starts or joins a family, and everyone adds to the
+shared caller ID (contact sync, name suggestions, spam and link reports), with per-user limits
+(contact sync 30 per hour, reports and names 60, link reports 30). `isTrusted` on a `User` is
+**deprecated and always `true`**; apps should stop reading it. The server still knows the
+operator's family (set up with `ADMIN_CODE`): only its admins see `GET /v1/telemetry`, and only
+their spam reports label a number `likely_scam` on their own. Anyone else's report counts as one
+of the reporters `SPAM_THRESHOLD` needs.
 
 **Email.** Each account can have one verified email (one account per email). With
 `EMAIL_VERIFICATION=required` on the server, every new account needs one. The app first calls
@@ -137,6 +141,13 @@ Errors:
 
 All of these act on the caller's family only; another family's member is `404`.
 
+- `POST /v1/family/join` `{ "code": "K7Q2-9XPM" }` → `User` (with `email`). A signed-in user
+  joins the invite's family as a member (not admin). They leave their old family: its admin rule
+  applies (`409 last_admin` if they are its only admin and others stay), an emptied family is
+  deleted, and their own recent alerts and SOS are deleted (they belonged to the old family).
+  `403 invalid_code` (unknown, used, expired, or bound to another phone), `409 already_member`.
+- `POST /v1/family/leave` → `User`. Leaves the family and starts a new one with the caller as its
+  admin. Same rules as above; `409 alone` if they are the only member already.
 - `GET /v1/members` → `{ "members": [User] }`
 - `PATCH /v1/members/:id` (admin) `{ "watched": bool, "isAdmin": bool }` → `User`
 - `DELETE /v1/members/:id` (admin) → `204`. `409 last_admin` if it is the only admin and

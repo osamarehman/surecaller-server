@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { Client } from '../db.js';
 import { badRequest } from '../errors.js';
-import { parse, requireTrusted } from '../http.js';
+import { parse, userKey } from '../http.js';
 import { buildLookups, spamLabel } from '../lookup.js';
 import { phonesInText } from '../phone.js';
 
@@ -35,8 +35,9 @@ export function urlsInText(text: string): string[] {
 
 async function urlInfo(db: Client, url: string, threshold: number) {
   const { rows } = await db.query<{ reports: number; admin: boolean }>(
-    `SELECT count(*) AS reports, coalesce(bool_or(u.is_admin), false) AS admin
-     FROM url_reports r JOIN users u ON u.id = r.user_id WHERE r.url = $1`,
+    `SELECT count(*) AS reports, coalesce(bool_or(u.is_admin AND f.trusted), false) AS admin
+     FROM url_reports r JOIN users u ON u.id = r.user_id JOIN families f ON f.id = u.family_id
+     WHERE r.url = $1`,
     [url],
   );
   const { reports, admin } = rows[0];
@@ -75,8 +76,7 @@ export async function checkRoutes(app: FastifyInstance) {
     return { phones, urls, verdict };
   });
 
-  app.post('/reports/url', async (req) => {
-    requireTrusted(req); // only trusted families add to the shared URL spam list
+  app.post('/reports/url', { config: { rateLimit: { max: 30, timeWindow: '1 hour', keyGenerator: userKey } } }, async (req) => {
     const b = parse(UrlReportBody, req.body);
     const url = normalizeUrl(b.url);
     if (!url) throw badRequest('invalid_url', 'Not a valid web link');

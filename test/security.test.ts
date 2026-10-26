@@ -48,20 +48,23 @@ describe('invite takeover protection', () => {
     const r = await api(h, 'POST', '/v1/register', null, { phone: '+923215550000', name: 'Open' });
     expect(r.status).toBe(201);
     expect(r.body.user.isAdmin).toBe(true); // admin of their own family
-    expect(r.body.user.isTrusted).toBe(false); // but doesn't add to the shared caller ID
+    expect(r.body.user.isTrusted).toBe(true); // deprecated: every user has the same features
     const roster = await api(h, 'GET', '/v1/members', r.body.token);
     expect(roster.body.members.map((m: { phone: string }) => m.phone)).toEqual(['+923215550000']);
     expect((await api(h, 'POST', '/v1/events', r.body.token, { type: 'sos' })).status).toBe(201);
-    // Shared data stays with trusted families.
-    expect((await api(h, 'POST', '/v1/contacts/sync', r.body.token, { contacts: [] })).status).toBe(403);
-    expect((await api(h, 'POST', '/v1/reports', r.body.token, { phone: '+923004445566' })).status).toBe(403);
+    // Everyone feeds the shared caller ID...
+    expect((await api(h, 'POST', '/v1/contacts/sync', r.body.token, { contacts: [] })).status).toBe(200);
+    const rep = await api(h, 'POST', '/v1/reports', r.body.token, { phone: '+923004445566' });
+    expect(rep.status).toBe(200);
+    // ...but admin of their own family is not a trusted admin: one report is only "suspected".
+    expect(rep.body.spam.label).toBe('suspected');
     // Server-wide telemetry is for the operator only.
     expect((await api(h, 'GET', '/v1/telemetry', r.body.token)).status).toBe(403);
     // Their invite joins their family, untrusted too.
     const inv = await api(h, 'POST', '/v1/invites', r.body.token, {});
     const kid = await api(h, 'POST', '/v1/register', null, { phone: '+923215550009', name: 'Kid', code: inv.body.code });
     expect(kid.status).toBe(201);
-    expect(kid.body.user.isTrusted).toBe(false);
+    expect(kid.body.user.isTrusted).toBe(true);
     expect((await api(h, 'GET', '/v1/members', r.body.token)).body.members).toHaveLength(2);
     // The same number can't be taken over without a code (anti-hijack).
     const again = await api(h, 'POST', '/v1/register', null, { phone: '+923215550000', name: 'Other' });

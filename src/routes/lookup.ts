@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { withTx } from '../db.js';
 import { Budget } from '../budget.js';
 import { tooManyRequests } from '../errors.js';
-import { parse, requireTrusted, userKey } from '../http.js';
+import { parse, userKey } from '../http.js';
 import { buildLookup, buildLookups, refreshSpamState } from '../lookup.js';
 import { vault } from '../vault.js';
 import { normalizePhone, requirePhone } from '../phone.js';
@@ -38,7 +38,7 @@ export async function lookupRoutes(app: FastifyInstance) {
       // sign-ups must not be able to nudge by repeatedly looking a number up.
       return buildLookup(pool, phone, {
         threshold,
-        logUserId: req.user.trusted ? req.user.id : undefined,
+        logUserId: req.user.id,
         familyId: req.user.family_id,
       });
     },
@@ -63,8 +63,8 @@ export async function lookupRoutes(app: FastifyInstance) {
     return { results: await buildLookups(pool, phones, threshold, undefined, req.user.family_id) };
   });
 
-  app.post('/reports', async (req) => {
-    requireTrusted(req); // only trusted families add to the shared spam list
+  // Every user feeds the shared spam list; the per-user limits stop one account flooding it.
+  app.post('/reports', { config: { rateLimit: { max: 60, timeWindow: '1 hour', keyGenerator: userKey } } }, async (req) => {
     const b = parse(ReportBody, req.body);
     const phone = requirePhone(b.phone, cfg.defaultRegion);
     const spamRaw = await withTx(pool, async (c) => {
@@ -89,8 +89,7 @@ export async function lookupRoutes(app: FastifyInstance) {
     return reply.status(204).send();
   });
 
-  app.post('/names', async (req) => {
-    requireTrusted(req); // only trusted families suggest shared names
+  app.post('/names', { config: { rateLimit: { max: 60, timeWindow: '1 hour', keyGenerator: userKey } } }, async (req) => {
     const b = parse(NameBody, req.body);
     const phone = requirePhone(b.phone, cfg.defaultRegion);
     await pool.query(

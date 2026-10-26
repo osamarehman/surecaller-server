@@ -73,11 +73,6 @@ export function requireAdmin(req: FastifyRequest): void {
   if (!req.user.is_admin) throw forbidden();
 }
 
-/** Adds to what every user sees (shared names, spam labels): trusted families only. */
-export function requireTrusted(req: FastifyRequest): void {
-  if (!req.user.trusted) throw forbidden('Only trusted families add to the shared caller ID.');
-}
-
 /**
  * Server-wide powers (everyone's telemetry). The operator is an admin of a trusted family.
  * ponytail: the only trusted family is the one ADMIN_CODE set up; add an operator flag if

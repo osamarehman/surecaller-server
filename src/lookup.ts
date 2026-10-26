@@ -60,8 +60,9 @@ async function rawSpam(db: Client, phones: string[]): Promise<Map<string, RawSpa
        SELECT r.phone,
          count(*) FILTER (WHERE NOT r.not_spam) AS reports,
          count(*) FILTER (WHERE r.not_spam) AS not_spam,
-         coalesce(bool_or(u.is_admin AND NOT r.not_spam), false) AS admin_reported
-       FROM reports r JOIN users u ON u.id = r.user_id
+         -- Only the trusted family's admins can label a number alone; anyone else's own family doesn't count.
+         coalesce(bool_or(u.is_admin AND f.trusted AND NOT r.not_spam), false) AS admin_reported
+       FROM reports r JOIN users u ON u.id = r.user_id JOIN families f ON f.id = u.family_id
        WHERE r.phone = ANY($1::text[])
        GROUP BY r.phone
      ), top AS (
@@ -207,7 +208,7 @@ async function reportedPhones(db: Client, userId: string): Promise<string[]> {
 }
 
 /**
- * Refreshes spam state for every phone a user has reported (admin reports count
+ * Refreshes spam state for every phone a user has reported (trusted admins' reports count
  * as likely_scam). `change` runs in between, so it may remove those reports,
  * e.g. by deleting the user.
  */

@@ -9,7 +9,8 @@ export interface UserRow {
   family_id: string;
   /** Admin of their own family. */
   is_admin: boolean;
-  /** From the family: adds to the shared caller-ID names and spam labels. */
+  /** The operator's family (set up with ADMIN_CODE): server-wide admin routes, and its admins'
+   *  spam reports label a number on their own. Every user has the same app features. */
   trusted: boolean;
   status: string | null;
   share_contacts: boolean;
@@ -32,7 +33,8 @@ export function toUser(row: UserRow) {
     phone: row.phone,
     name: row.name,
     isAdmin: row.is_admin,
-    isTrusted: row.trusted,
+    // Deprecated: always true. Every user has the same features; old apps hid some when false.
+    isTrusted: true,
     status: row.status,
     shareContacts: row.share_contacts,
     sharedContactCount: row.shared_contact_count ?? 0,

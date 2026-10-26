@@ -1,19 +1,40 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { lockCircle, withTx } from '../db.js';
-import { badRequest, conflict, forbidden, notFound } from '../errors.js';
-import { parse, requireAdmin, requireTrusted } from '../http.js';
+import { AppError, badRequest, conflict, forbidden, notFound } from '../errors.js';
+import { parse, requireAdmin, userKey } from '../http.js';
 import { refreshSpamForUser } from '../lookup.js';
 import { normalizePhone, requirePhone } from '../phone.js';
 import { vault } from '../vault.js';
-import { newInviteCode } from '../tokens.js';
-import { assertKeepsAnAdmin, getUser, toUser, USER_SELECT, UUID_RE, type UserRow } from '../users.js';
+import { canonicalInviteCode, newInviteCode } from '../tokens.js';
+import type { PoolClient } from 'pg';
+import { assertKeepsAnAdmin, getUser, toMe, toUser, USER_SELECT, UUID_RE, type UserRow } from '../users.js';
 import { deleteMember } from './me.js';
 
 const PatchMember = z.object({
   watched: z.boolean().optional(),
   isAdmin: z.boolean().optional(),
 });
+
+const JoinBody = z.object({ code: z.string().trim().min(1).max(200) });
+
+/**
+ * Moves a member out of their family (under lockCircle). The family must keep an admin if others
+ * stay, and an emptied family is deleted. Their recent alerts and SOS go too: those belong to the
+ * family they were sent in.
+ */
+async function moveMember(c: PoolClient, user: UserRow, to: { familyId: string; admin: boolean }) {
+  await assertKeepsAnAdmin(c, { removing: user.id });
+  await c.query('DELETE FROM events WHERE from_user = $1', [user.id]);
+  await c.query('UPDATE users SET family_id = $2, is_admin = $3, watched = false WHERE id = $1', [
+    user.id,
+    to.familyId,
+    to.admin,
+  ]);
+  await c.query('DELETE FROM families f WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM users WHERE family_id = f.id)', [
+    user.family_id,
+  ]);
+}
 
 const InviteBody = z.object({
   expiresInHours: z.number().int().min(1).max(24 * 30).optional().default(72),
@@ -75,6 +96,42 @@ export async function circleRoutes(app: FastifyInstance) {
     return reply.status(204).send();
   });
 
+  // A signed-in user joins another family with its invite code, as a member.
+  app.post('/family/join', async (req) => {
+    const { code } = parse(JoinBody, req.body);
+    await withTx(pool, async (c) => {
+      await lockCircle(c);
+      const invite = (
+        await c.query<{ code: string; phone: string | null; family_id: string }>(
+          `SELECT code, phone, family_id FROM invites
+           WHERE code = $1 AND used_at IS NULL AND expires_at > now() FOR UPDATE`,
+          [canonicalInviteCode(code)],
+        )
+      ).rows[0];
+      if (!invite || (invite.phone !== null && invite.phone !== req.user.phone)) {
+        throw new AppError(403, 'invalid_code', 'Invite code is not valid');
+      }
+      if (invite.family_id === req.user.family_id) throw conflict('already_member', "You're already in this family");
+      await moveMember(c, req.user, { familyId: invite.family_id, admin: false });
+      await c.query('UPDATE invites SET used_at = now(), used_by = $2 WHERE code = $1', [invite.code, req.user.id]);
+    });
+    return toMe((await getUser(pool, req.user.id))!);
+  });
+
+  // Leaves the family and starts a new one with this user as its admin.
+  app.post('/family/leave', async (req) => {
+    await withTx(pool, async (c) => {
+      await lockCircle(c);
+      const { rows } = await c.query<{ n: number }>('SELECT count(*)::int AS n FROM users WHERE family_id = $1', [
+        req.user.family_id,
+      ]);
+      if (rows[0].n === 1) throw conflict('alone', "You're the only member already");
+      const fam = await c.query<{ id: string }>('INSERT INTO families DEFAULT VALUES RETURNING id');
+      await moveMember(c, req.user, { familyId: fam.rows[0].id, admin: true });
+    });
+    return toMe((await getUser(pool, req.user.id))!);
+  });
+
   // Non-admins may send up to this many plain invites (outstanding + already used).
   const MEMBER_INVITE_LIMIT = 5;
 
@@ -133,8 +190,7 @@ export async function circleRoutes(app: FastifyInstance) {
     return { members: rows[0].members, knownNumbers: rows[0].known, spamBlocked: rows[0].blocked };
   });
 
-  app.post('/contacts/sync', async (req) => {
-    requireTrusted(req); // only trusted families add names to the shared database
+  app.post('/contacts/sync', { config: { rateLimit: { max: 30, timeWindow: '1 hour', keyGenerator: userKey } } }, async (req) => {
     const raw = req.body as { contacts?: unknown } | undefined;
     if (Array.isArray(raw?.contacts) && raw.contacts.length > MAX_CONTACTS) {
       throw badRequest('too_many_contacts', `At most ${MAX_CONTACTS} contacts per request`);
