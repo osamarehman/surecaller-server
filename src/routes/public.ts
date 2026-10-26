@@ -12,7 +12,8 @@ import { Email, EmailProof, isEmailTaken, issueEmailCode, proveEmail, spendEmail
 import { getUser, toMe, type UserRow } from '../users.js';
 
 const RegisterBody = z.object({
-  phone: z.string(),
+  // Optional only for "sign in with email": a verified email and no phone finds the account by email.
+  phone: z.string().optional(),
   name: z.string().trim().max(60).optional(),
   code: z.string().max(200).optional().default(''),
   deviceName: z.string().trim().max(100).nullish(),
@@ -54,10 +55,28 @@ export async function publicRoutes(app: FastifyInstance) {
     { bodyLimit: 4096, config: { rateLimit: { max: cfg.registerRateLimit, timeWindow: '1 minute' } } },
     async (req, reply) => {
       const body = parse(RegisterBody, req.body);
-      const phone = requirePhone(body.phone, cfg.defaultRegion);
       const code = body.code.trim();
       const token = newToken();
       const email = await proveEmail(app.ctx, body);
+
+      // Sign in with email: the verified email finds the account, whatever SIM this phone has.
+      if (body.phone === undefined) {
+        if (!email) throw badRequest('invalid_request', 'phone: required');
+        if (code) throw badRequest('invalid_request', 'Sign in with email takes no code');
+        const id = await withTx(pool, async (c) => {
+          await spendEmailCode(c, email);
+          const { rows } = await c.query<{ id: string }>(
+            `UPDATE users SET token_hash = $2, device_name = coalesce($3, device_name),
+               fcm_token = NULL, last_seen_at = now()
+             WHERE email = $1 RETURNING id`,
+            [email, hashToken(token), body.deviceName ?? null],
+          );
+          if (!rows[0]) throw new AppError(404, 'no_account', 'No account uses this email; sign up instead');
+          return rows[0].id;
+        });
+        return reply.status(201).send({ token, user: toMe((await getUser(pool, id))!) });
+      }
+      const phone = requirePhone(body.phone, cfg.defaultRegion);
 
       const { userId, adminTakeover } = await withTx(pool, async (c) => {
         if (email) await spendEmailCode(c, email);

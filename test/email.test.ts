@@ -174,4 +174,38 @@ describe('email verification', () => {
     expect(p.status).toBe(200);
     expect(p.body.email).toBe('new@gmail.com');
   });
+
+  it('signs in with email alone, on a phone with any SIM', async () => {
+    const r = await api(h, 'POST', '/v1/register', null, {
+      phone: '+923001110007',
+      name: 'S',
+      googleIdToken: 'google:s@gmail.com',
+    });
+    const viaGoogle = await api(h, 'POST', '/v1/register', null, { googleIdToken: 'google:s@gmail.com', deviceName: 'New' });
+    expect(viaGoogle.status).toBe(201);
+    expect(viaGoogle.body.user.id).toBe(r.body.user.id);
+    expect(viaGoogle.body.user.phone).toBe('+923001110007');
+    expect((await api(h, 'GET', '/v1/me', r.body.token)).status).toBe(401);
+
+    const code = await getCode('s@gmail.com');
+    const viaCode = await api(h, 'POST', '/v1/register', null, { email: 's@gmail.com', emailCode: code });
+    expect(viaCode.body.user.id).toBe(r.body.user.id);
+
+    // Unknown email: 404, and the code is not spent, so it can still create the account.
+    const fresh = await getCode('nobody@example.com');
+    const none = await api(h, 'POST', '/v1/register', null, { email: 'nobody@example.com', emailCode: fresh });
+    expect(none.status).toBe(404);
+    expect(none.body.error).toBe('no_account');
+    const signUp = await api(h, 'POST', '/v1/register', null, {
+      phone: '+923001110008',
+      name: 'N',
+      email: 'nobody@example.com',
+      emailCode: fresh,
+    });
+    expect(signUp.status).toBe(201);
+
+    // No phone needs a verified email.
+    expect((await api(h, 'POST', '/v1/register', null, { name: 'X' })).status).toBe(400);
+    expect((await api(h, 'POST', '/v1/register', null, { googleIdToken: 'forged' })).status).toBe(403);
+  });
 });

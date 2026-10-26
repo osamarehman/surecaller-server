@@ -47,6 +47,12 @@ Either proof also signs an existing member in on
 a new phone without an admin (open sign-up path, no `code`), as long as the email matches the
 account's. The email is shown only to its owner (`GET /v1/me`), never to other members.
 
+**Sign in with email.** `POST /v1/register` with a verified email (`googleIdToken`, or `email` +
+`emailCode`) and **no `phone`** (and no `code`) signs in to the account that has that email,
+whatever SIM the phone has. Same response as register; the account keeps its own phone number,
+and the previous device is signed out. `404 no_account` when no account has the email (the email
+code is not spent, so the app can go on to sign-up with it).
+
 ### `POST /v1/email-codes`
 ```json
 { "email": "ali@example.com" }
