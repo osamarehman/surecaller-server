@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { lockCircle, withTx } from '../db.js';
 import { AppError, badRequest, conflict, forbidden, notFound } from '../errors.js';
@@ -97,7 +97,10 @@ export async function circleRoutes(app: FastifyInstance) {
   });
 
   // A signed-in user joins another family with its invite code, as a member.
-  app.post('/family/join', async (req) => {
+  // `/join` is the same route: the app's first build calls it.
+  app.post('/join', (req) => joinFamily(req));
+  app.post('/family/join', (req) => joinFamily(req));
+  async function joinFamily(req: FastifyRequest) {
     const { code } = parse(JoinBody, req.body);
     await withTx(pool, async (c) => {
       await lockCircle(c);
@@ -116,7 +119,7 @@ export async function circleRoutes(app: FastifyInstance) {
       await c.query('UPDATE invites SET used_at = now(), used_by = $2 WHERE code = $1', [invite.code, req.user.id]);
     });
     return toMe((await getUser(pool, req.user.id))!);
-  });
+  }
 
   // Leaves the family and starts a new one with this user as its admin.
   app.post('/family/leave', async (req) => {

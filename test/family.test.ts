@@ -22,7 +22,8 @@ describe('join and leave a family when signed in', () => {
 
     const inv = await api(h, 'POST', '/v1/invites', ali.token, {});
     expect((await api(h, 'POST', '/v1/family/join', sara.token, { code: 'NOPE-NOPE' })).status).toBe(403);
-    const join = await api(h, 'POST', '/v1/family/join', sara.token, { code: inv.body.code.toLowerCase() });
+    // /v1/join is the same route as /v1/family/join.
+    const join = await api(h, 'POST', '/v1/join', sara.token, { code: inv.body.code.toLowerCase() });
     expect(join.status).toBe(200);
     expect(join.body.isAdmin).toBe(false);
     expect(await names(ali.token)).toEqual(['Ali', 'Sara']);

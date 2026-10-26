@@ -141,7 +141,7 @@ Errors:
 
 All of these act on the caller's family only; another family's member is `404`.
 
-- `POST /v1/family/join` `{ "code": "K7Q2-9XPM" }` → `User` (with `email`). A signed-in user
+- `POST /v1/family/join` (also `POST /v1/join`) `{ "code": "K7Q2-9XPM" }` → `User` (with `email`). A signed-in user
   joins the invite's family as a member (not admin). They leave their old family: its admin rule
   applies (`409 last_admin` if they are its only admin and others stay), an emptied family is
   deleted, and their own recent alerts and SOS are deleted (they belonged to the old family).
