@@ -8,7 +8,7 @@ import { lockCircle, withTx } from '../db.js';
 import { AppError, badRequest, conflict, notFound } from '../errors.js';
 import { maskPhone, requirePhone } from '../phone.js';
 import { canonicalInviteCode, hashToken, newToken, safeEqual } from '../tokens.js';
-import { Email, EmailProof, isEmailTaken, issueEmailCode, proveEmail, spendEmailCode } from '../email.js';
+import { Email, EmailProof, emailTaken, issueEmailCode, proveEmail, spendEmailCode } from '../email.js';
 import { getUser, toMe, type UserRow } from '../users.js';
 
 const RegisterBody = z.object({
@@ -166,9 +166,7 @@ export async function publicRoutes(app: FastifyInstance) {
         }
         if (inviteCode) await c.query('UPDATE invites SET used_by = $2 WHERE code = $1', [inviteCode, id]);
         return { userId: id, adminTakeover };
-      }).catch((e) => {
-        throw isEmailTaken(e) ? conflict('email_taken', 'This email is already used by another account') : e;
-      });
+      }).catch(emailTaken);
 
       // Audit trail for the master credential: logged after commit so a rolled-back attempt
       // does not show up as a takeover. Phone masked; the IP is what the rate limiter sees.

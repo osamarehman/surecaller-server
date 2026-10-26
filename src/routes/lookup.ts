@@ -34,8 +34,8 @@ export async function lookupRoutes(app: FastifyInstance) {
     { config: { rateLimit: { max: cfg.lookupRateLimit, timeWindow: '1 minute', keyGenerator: userKey } } },
     async (req) => {
       const phone = requirePhone(req.params.phone, cfg.defaultRegion);
-      // Don't log untrusted lookups: the call-count feeds shared spam scores, which open
-      // sign-ups must not be able to nudge by repeatedly looking a number up.
+      // Every lookup counts toward callsToday and the spam score (never the label); the per-user
+      // rate limit above caps how far one account can push it.
       return buildLookup(pool, phone, {
         threshold,
         logUserId: req.user.id,

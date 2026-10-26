@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { z } from 'zod';
 import type { Client } from './db.js';
-import { AppError, badRequest } from './errors.js';
+import { AppError, badRequest, conflict } from './errors.js';
 import { hashToken, safeEqual } from './tokens.js';
 
 export const Email = z
@@ -48,10 +48,14 @@ export async function checkEmailCode(db: Client, email: string, code: string): P
 export const spendEmailCode = (db: Client, email: string) =>
   db.query('DELETE FROM email_codes WHERE email = $1', [email]);
 
-/** Postgres unique violation on users.email. */
-export const isEmailTaken = (e: unknown) =>
-  (e as { code?: string; constraint?: string }).code === '23505' &&
-  (e as { constraint?: string }).constraint === 'users_email_unique';
+/** `.catch(emailTaken)`: turns the unique violation on users.email into 409 email_taken. */
+export function emailTaken(e: unknown): never {
+  const pg = e as { code?: string; constraint?: string };
+  if (pg.code === '23505' && pg.constraint === 'users_email_unique') {
+    throw conflict('email_taken', 'This email is already used by another account');
+  }
+  throw e;
+}
 
 /** Returns the verified email in a Google ID token, or null if the token doesn't check out. */
 export type GoogleVerifier = (idToken: string) => Promise<string | null>;

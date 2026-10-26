@@ -4,8 +4,8 @@ import { z } from 'zod';
 import { lockCircle, withTx } from '../db.js';
 import { parse } from '../http.js';
 import { refreshSpamForUser } from '../lookup.js';
-import { EmailProof, isEmailTaken, proveEmail, spendEmailCode } from '../email.js';
-import { conflict, notFound } from '../errors.js';
+import { emailTaken, EmailProof, proveEmail, spendEmailCode } from '../email.js';
+import { notFound } from '../errors.js';
 import { assertKeepsAnAdmin, getUser, toMe } from '../users.js';
 
 const PatchMe = z.object({
@@ -81,9 +81,7 @@ export async function meRoutes(app: FastifyInstance) {
       if (sets.length) await c.query(`UPDATE users SET ${sets.join(', ')} WHERE id = $1`, vals);
       // Turning sharing off removes what was shared.
       if (b.shareContacts === false) await c.query('DELETE FROM contacts WHERE user_id = $1', [req.user.id]);
-    }).catch((e) => {
-      throw isEmailTaken(e) ? conflict('email_taken', 'This email is already used by another account') : e;
-    });
+    }).catch(emailTaken);
     return toMe((await getUser(pool, req.user.id))!);
   });
 

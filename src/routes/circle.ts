@@ -1,13 +1,12 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { lockCircle, withTx } from '../db.js';
+import { lockCircle, withTx, type Client } from '../db.js';
 import { AppError, badRequest, conflict, forbidden, notFound } from '../errors.js';
 import { parse, requireAdmin, userKey } from '../http.js';
 import { refreshSpamForUser } from '../lookup.js';
 import { normalizePhone, requirePhone } from '../phone.js';
 import { vault } from '../vault.js';
 import { canonicalInviteCode, newInviteCode } from '../tokens.js';
-import type { PoolClient } from 'pg';
 import { assertKeepsAnAdmin, getUser, toMe, toUser, USER_SELECT, UUID_RE, type UserRow } from '../users.js';
 import { deleteMember } from './me.js';
 
@@ -23,7 +22,7 @@ const JoinBody = z.object({ code: z.string().trim().min(1).max(200) });
  * stay, and an emptied family is deleted. Their recent alerts and SOS go too: those belong to the
  * family they were sent in.
  */
-async function moveMember(c: PoolClient, user: UserRow, to: { familyId: string; admin: boolean }) {
+async function moveMember(c: Client, user: UserRow, to: { familyId: string; admin: boolean }) {
   await assertKeepsAnAdmin(c, { removing: user.id });
   await c.query('DELETE FROM events WHERE from_user = $1', [user.id]);
   await c.query('UPDATE users SET family_id = $2, is_admin = $3, watched = false WHERE id = $1', [
@@ -98,8 +97,8 @@ export async function circleRoutes(app: FastifyInstance) {
 
   // A signed-in user joins another family with its invite code, as a member.
   // `/join` is the same route: the app's first build calls it.
-  app.post('/join', (req) => joinFamily(req));
-  app.post('/family/join', (req) => joinFamily(req));
+  app.post('/join', joinFamily);
+  app.post('/family/join', joinFamily);
   async function joinFamily(req: FastifyRequest) {
     const { code } = parse(JoinBody, req.body);
     await withTx(pool, async (c) => {
