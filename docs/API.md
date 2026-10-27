@@ -182,7 +182,8 @@ Replaces the caller's whole shared address book.
 {
   "phone": "+923215550142",
   "name": "Ali Raza",                     // best name or null
-  "nameSource": "member" | "contacts" | "suggested" | null,
+  "nameSource": "member" | "contacts" | "directory" | "suggested" | null,
+  "category": "restaurant" | null,        // business type, only when nameSource is "directory"
   "altNames": [],                         // always empty: other saved names are never exposed
   "savedByCount": 3,                      // how many users have it saved
   "member": { "id": "uuid", "name": "Ali", "status": "Driving" } | null,

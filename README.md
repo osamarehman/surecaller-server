@@ -242,6 +242,19 @@ docker compose exec api node dist/cli/privacy.js reject <id>
 
 New requests also show in the logs as `privacy request received`.
 
+## Business directory (optional)
+
+Names for business numbers no user has saved, from [Overture Maps](https://docs.overturemaps.org/guides/places)
+places (CDLA Permissive 2.0, Apache 2.0 and CC0, depending on the source). Lookups use a saved
+contact first, then the directory, then name suggestions. Build the file with
+[DuckDB](https://duckdb.org) (edit the release, bounding box and country in the script), then
+load it. Each import replaces the last one and skips opted-out numbers.
+
+```bash
+duckdb < scripts/overture-directory.sql        # writes directory.ndjson
+docker compose exec -T api node dist/cli/directory.js import < directory.ndjson
+```
+
 ## Push notifications (optional)
 
 Without Firebase, the app gets family alerts and SOS by polling. For instant push:

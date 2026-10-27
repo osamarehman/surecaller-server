@@ -184,7 +184,7 @@ export async function circleRoutes(app: FastifyInstance) {
       `SELECT
          (SELECT count(*) FROM users WHERE family_id = $2) AS members,
          (SELECT count(*) FROM (SELECT phone_hash FROM contacts UNION SELECT phone_hash FROM name_suggestions
-                                UNION SELECT unnest($1::bytea[])) k) AS known,
+                                UNION SELECT phone_hash FROM directory UNION SELECT unnest($1::bytea[])) k) AS known,
          (SELECT count(*) FROM events e JOIN users u ON u.id = e.from_user
           WHERE e.type = 'spam_call' AND u.family_id = $2) AS blocked`,
       [userPhones.map((u) => vault().index(u.phone)), req.user.family_id],

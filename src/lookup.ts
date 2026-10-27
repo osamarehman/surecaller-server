@@ -15,7 +15,9 @@ export interface SpamInfo {
 export interface Lookup {
   phone: string;
   name: string | null;
-  nameSource: 'member' | 'contacts' | 'suggested' | null;
+  nameSource: 'member' | 'contacts' | 'directory' | 'suggested' | null;
+  /** The business type, when the name comes from the directory (e.g. "restaurant"). */
+  category: string | null;
   altNames: { name: string; count: number }[];
   savedByCount: number;
   member: { id: string; name: string; status: string | null } | null;
@@ -245,7 +247,7 @@ export async function buildLookups(
   const phones = [...new Set(phoneList)];
   if (phones.length === 0) return [];
   const index = indexPhones(phones);
-  const [callsBy, memberRes, contactRes, suggestRes, blockRes, spamBy] = await Promise.all([
+  const [callsBy, memberRes, contactRes, dirRes, suggestRes, blockRes, spamBy] = await Promise.all([
     callCounts(pool, phones),
     pool.query<{ phone: string; id: string; name: string; status: string | null }>(
       // Only your own family members are badged as "member"; other families stay invisible.
@@ -258,6 +260,10 @@ export async function buildLookups(
        WHERE phone_hash = ANY($1::bytea[])
          AND (NOT family_only OR user_id IN (SELECT id FROM users WHERE family_id = $2))`,
       [index.hashes, familyId],
+    ),
+    pool.query<{ phone_hash: Buffer; name_enc: Buffer; category: string | null }>(
+      'SELECT phone_hash, name_enc, category FROM directory WHERE phone_hash = ANY($1::bytea[])',
+      [index.hashes],
     ),
     pool.query<{ phone_hash: Buffer; name_enc: Buffer; at: Date }>(
       'SELECT phone_hash, name_enc, created_at AS at FROM name_suggestions WHERE phone_hash = ANY($1::bytea[])',
@@ -278,6 +284,13 @@ export async function buildLookups(
   const memberBy = new Map(memberRes.rows.map((r) => [r.phone, r]));
   const contactsBy = rankNames(contactRes.rows, index.phoneOf);
   const suggestBy = rankNames(suggestRes.rows, index.phoneOf);
+  const dirBy = new Map(
+    dirRes.rows.flatMap((r) => {
+      const phone = index.phoneOf(r.phone_hash);
+      const name = phone ? vault().open(phone, r.name_enc) : null;
+      return phone && name !== null ? [[phone, { name, category: r.category }] as const] : [];
+    }),
+  );
   const blockBy = new Map(blockRes.rows.map((r) => [r.phone, r]));
 
   return phones.map((phone): Lookup => {
@@ -286,6 +299,7 @@ export async function buildLookups(
     const contacts = contactsBy.get(phone) ?? [];
     const suggested = suggestBy.get(phone) ?? [];
     const block = blockBy.get(phone);
+    const dir = dirBy.get(phone);
 
     let name: string | null = null;
     let nameSource: Lookup['nameSource'] = null;
@@ -295,6 +309,9 @@ export async function buildLookups(
     } else if (contacts.length > 0) {
       name = contacts[0].name;
       nameSource = 'contacts';
+    } else if (dir) {
+      name = dir.name;
+      nameSource = 'directory';
     } else if (suggested.length > 0) {
       name = suggested[0].name;
       nameSource = 'suggested';
@@ -304,6 +321,7 @@ export async function buildLookups(
       phone,
       name,
       nameSource,
+      category: nameSource === 'directory' ? dir!.category : null,
       // Only the single best caller-ID name is exposed; the other names people saved for this
       // number are never returned, so no one can read the shared contacts through a lookup.
       altNames: [],

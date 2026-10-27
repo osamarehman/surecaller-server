@@ -6,7 +6,7 @@
  *   docker compose exec api node dist/cli/privacy.js reject <id>
  *
  * apply, kind "account": deletes that member (same as Delete account in the app).
- * apply, kind "remove":  adds the number to opt_outs and deletes every shared name for it.
+ * apply, kind "remove":  adds the number to opt_outs and deletes every shared and directory name for it.
  * Either way the request row is deleted afterwards, so the phone and email don't linger.
  */
 import { loadConfig } from '../config.js';
@@ -47,7 +47,10 @@ async function main() {
     await pool.query('INSERT INTO opt_outs (phone_hash) VALUES ($1) ON CONFLICT DO NOTHING', [h]);
     const c = await pool.query('DELETE FROM contacts WHERE phone_hash = $1', [h]);
     const n = await pool.query('DELETE FROM name_suggestions WHERE phone_hash = $1', [h]);
-    console.log(`Opted out ${r.phone}: removed ${c.rowCount} shared contacts and ${n.rowCount} name suggestions.`);
+    const d = await pool.query('DELETE FROM directory WHERE phone_hash = $1', [h]);
+    console.log(
+      `Opted out ${r.phone}: removed ${c.rowCount} shared contacts, ${n.rowCount} name suggestions and ${d.rowCount} directory entries.`,
+    );
   }
   await pool.query('DELETE FROM privacy_requests WHERE id = $1', [r.id]);
   console.log(`Request #${r.id} closed. Email ${r.email} to confirm.`);
