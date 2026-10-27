@@ -250,8 +250,13 @@ contact first, then the directory, then name suggestions. Build the file with
 [DuckDB](https://duckdb.org) (edit the release, bounding box and country in the script), then
 load it. Each import replaces the last one and skips opted-out numbers.
 
+For Pakistan, the [Yellow Pages of Pakistan](https://opendata.com.pk/dataset/yellow-pages-of-pakistan)
+open dataset (PDDL, 2019) adds older listings, mostly landlines. Put it after Overture so
+Overture's name wins where both list a number.
+
 ```bash
 duckdb < scripts/overture-directory.sql        # writes directory.ndjson
+python3 scripts/yellow-pages.py yp/*.csv >> directory.ndjson   # optional, Pakistan only
 docker compose exec -T api node dist/cli/directory.js import < directory.ndjson
 ```
 

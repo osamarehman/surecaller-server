@@ -9,7 +9,6 @@ COPY (
     FROM read_parquet('s3://overturemaps-us-west-2/release/2026-10-21.0/theme=places/type=place/*', hive_partitioning = 1)
     WHERE bbox.xmin BETWEEN 60.5 AND 78.0 AND bbox.ymin BETWEEN 23.5 AND 37.2   -- Pakistan
       AND addresses[1].country = 'PK'
-      AND confidence >= 0.5
       AND coalesce(operating_status, 'open') = 'open'
   )
   ORDER BY confidence DESC   -- the import keeps the first name per number
