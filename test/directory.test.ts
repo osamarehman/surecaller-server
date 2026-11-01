@@ -35,9 +35,9 @@ describe('business directory', () => {
 
     // A name someone saved wins over the directory.
     await api(h, 'PATCH', '/v1/me', me.token, { shareContacts: true });
-    await api(h, 'POST', '/v1/contacts/sync', me.token, { contacts: [{ phone: '03001240003', name: 'Saved name' }] });
+    await api(h, 'POST', '/v1/contacts/sync', me.token, { contacts: [{ phone: '03001240003', name: 'Saved Name' }] });
     const saved = (await api(h, 'GET', '/v1/lookup/+923001240003', me.token)).body;
-    expect(saved).toMatchObject({ name: 'Saved name', nameSource: 'contacts', category: null });
+    expect(saved).toMatchObject({ name: 'Saved Name', nameSource: 'contacts', category: null });
 
     // A new import replaces the old one.
     expect(await importDirectory(h.pool, [{ phone: '03001240005', name: 'Only one' }], 'PK')).toBe(1);

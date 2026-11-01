@@ -57,11 +57,19 @@ describe('contacts sync and lookup', () => {
   });
 
   it('breaks name ties by most recent', async () => {
-    await api(h, 'POST', '/v1/contacts/sync', ali.token, { contacts: [{ phone: '+923007770001', name: 'Old Name' }] });
+    await api(h, 'POST', '/v1/contacts/sync', ali.token, { contacts: [{ phone: '+923007770001', name: 'Ali Khan' }] });
     await new Promise((r) => setTimeout(r, 20));
-    await api(h, 'POST', '/v1/contacts/sync', sara.token, { contacts: [{ phone: '+923007770001', name: 'New Name' }] });
+    await api(h, 'POST', '/v1/contacts/sync', sara.token, { contacts: [{ phone: '+923007770001', name: 'Sara Khan' }] });
     const r = await api(h, 'GET', '/v1/lookup/+923007770001', admin.token);
-    expect(r.body.name).toBe('New Name');
+    expect(r.body.name).toBe('Sara Khan');
+  });
+
+  it('cleans shared names and prefers an English spelling', async () => {
+    await api(h, 'POST', '/v1/contacts/sync', ali.token, { contacts: [{ phone: '+923007770002', name: 'وحید' }] });
+    await api(h, 'POST', '/v1/contacts/sync', admin.token, { contacts: [{ phone: '+923007770002', name: '1st Wife' }] });
+    expect((await api(h, 'GET', '/v1/lookup/+923007770002', admin.token)).body.name).toBe('Waheed');
+    await api(h, 'POST', '/v1/contacts/sync', sara.token, { contacts: [{ phone: '+923007770002', name: 'Waheed Jazz' }] });
+    expect((await api(h, 'GET', '/v1/lookup/+923007770002', admin.token)).body.name).toBe('Waheed');
   });
 
   it('member profile beats contacts; suggested names are the last resort', async () => {

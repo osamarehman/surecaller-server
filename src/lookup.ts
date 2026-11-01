@@ -1,4 +1,5 @@
 import type { Client, Pool } from './db.js';
+import { cleanName, romanize } from './names.js';
 import { vault } from './vault.js';
 
 export type SpamLabel = 'none' | 'suspected' | 'likely_scam';
@@ -128,7 +129,10 @@ function indexPhones(phones: string[]) {
   return { hashes, phoneOf: (h: Buffer) => byHex.get(h.toString('hex')) };
 }
 
-/** Opens sealed names and ranks them per phone: most people first, then most recent. */
+// A spelling someone typed in English beats one converted from Urdu (romanize, after ranking).
+const latin = (name: string) => (/\p{Script=Latin}/u.test(name) ? 1 : 0);
+
+/** Opens and cleans sealed names, then ranks them per phone: English spelling, most people, most recent. */
 function rankNames(
   rows: { phone_hash: Buffer; name_enc: Buffer; at: Date }[],
   phoneOf: (h: Buffer) => string | undefined,
@@ -136,7 +140,8 @@ function rankNames(
   const acc = new Map<string, Map<string, { count: number; at: number }>>();
   for (const r of rows) {
     const phone = phoneOf(r.phone_hash);
-    const name = phone ? vault().open(phone, r.name_enc) : null;
+    const opened = phone ? vault().open(phone, r.name_enc) : null;
+    const name = opened === null ? null : cleanName(opened);
     if (!phone || name === null) continue;
     let names = acc.get(phone);
     if (!names) acc.set(phone, (names = new Map()));
@@ -150,7 +155,7 @@ function rankNames(
   for (const [phone, names] of acc) {
     out.set(
       phone,
-      [...names].sort((a, b) => b[1].count - a[1].count || b[1].at - a[1].at).map(([name, x]) => ({ name, count: x.count })),
+      [...names].sort((a, b) => latin(b[0]) - latin(a[0]) || b[1].count - a[1].count || b[1].at - a[1].at).map(([name, x]) => ({ name: romanize(name), count: x.count })),
     );
   }
   return out;

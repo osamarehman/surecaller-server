@@ -50,7 +50,7 @@ describe('contacts at rest', () => {
     await h.pool.query('TRUNCATE families, users, invites, contacts, name_suggestions, lookups CASCADE');
     const admin = await registerAdmin(h);
     await h.pool.query(`CREATE TABLE contacts_plain (user_id uuid, phone text, name text, updated_at timestamptz DEFAULT now());
-      INSERT INTO contacts_plain (user_id, phone, name) VALUES ('${admin.user.id}', '+923216660011', 'Old Family Contact')`);
+      INSERT INTO contacts_plain (user_id, phone, name) VALUES ('${admin.user.id}', '+923216660011', 'Family Contact')`);
     await migrate(h.pool);
     expect((await h.pool.query("SELECT to_regclass('contacts_plain') AS t")).rows[0].t).toBeNull();
     const { rows } = await h.pool.query('SELECT family_only, name_enc FROM contacts WHERE phone_hash = $1', [
@@ -58,19 +58,19 @@ describe('contacts at rest', () => {
     ]);
     expect(rows).toHaveLength(1);
     expect(rows[0].family_only).toBe(true);
-    expect(vault().open('+923216660011', rows[0].name_enc)).toBe('Old Family Contact');
+    expect(vault().open('+923216660011', rows[0].name_enc)).toBe('Family Contact');
 
     // Family sees it; an open sign-up doesn't. A re-sync keeps the family-only flag.
     const open = await api(h, 'POST', '/v1/register', null, { phone: '+923216660099', name: 'Stranger' });
-    expect((await api(h, 'GET', '/v1/lookup/+923216660011', admin.token)).body.name).toBe('Old Family Contact');
+    expect((await api(h, 'GET', '/v1/lookup/+923216660011', admin.token)).body.name).toBe('Family Contact');
     expect((await api(h, 'GET', '/v1/lookup/+923216660011', open.body.token)).body.name).toBeNull();
     await api(h, 'POST', '/v1/contacts/sync', admin.token, {
       contacts: [
-        { phone: '+923216660011', name: 'Old Family Contact' },
-        { phone: '+923216660022', name: 'New Contact' },
+        { phone: '+923216660011', name: 'Family Contact' },
+        { phone: '+923216660022', name: 'Second Contact' },
       ],
     });
     expect((await api(h, 'GET', '/v1/lookup/+923216660011', open.body.token)).body.name).toBeNull();
-    expect((await api(h, 'GET', '/v1/lookup/+923216660022', open.body.token)).body.name).toBe('New Contact');
+    expect((await api(h, 'GET', '/v1/lookup/+923216660022', open.body.token)).body.name).toBe('Second Contact');
   });
 });

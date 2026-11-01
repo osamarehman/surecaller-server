@@ -200,7 +200,11 @@ Replaces the caller's whole shared address book.
 }
 ```
 Name priority: circle member's own profile → most common name among shared contacts
-(ties: most recent) → suggested names. Every lookup is logged (phone, user, time) for `callsToday`.
+(ties: most recent) → suggested names. Shared contact and suggested names are cleaned first
+(`src/names.ts`): a name that only says how the uploader knows the person ("Wife", "Ammi", "Me")
+is never shown; tags like "Jazz", "Office", "Bhai", digits and trailing initials are dropped; a
+name typed in English beats one typed in Urdu, and an Urdu-only name is written in English letters.
+Every lookup is logged (phone, user, time) for `callsToday`.
 
 Rate limit: `LOOKUP_RATE_LIMIT` (default 120) per member per minute → `429 rate_limited`.
 
