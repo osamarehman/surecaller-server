@@ -68,6 +68,13 @@ describe("handyman directory", () => {
         })
       ).status,
     ).toBe(400);
+    const atlantis = {
+      name: "Nowhere Fix",
+      phone: "03001212123",
+      city: "Atlantis",
+      category: "Plumber",
+    };
+    expect((await add(atlantis)).status).toBe(400);
 
     expect(
       (await api(h, "GET", "/v1/handymen/cities", b.token)).body.cities,

@@ -36,14 +36,27 @@ export const tidy = (s: string) => {
 };
 
 const label = z.string().trim().min(2).max(40).transform(tidy);
+
+// The app's city dropdown sends exactly these; anything else is an old or modified client.
+const CITIES = new Map(
+  `Abbottabad|Bahawalpur|Chiniot|Dera Ghazi Khan|Faisalabad|Gilgit|Gujranwala|Gujrat|Hyderabad|Islamabad|Jhang
+  |Jhelum|Karachi|Kasur|Lahore|Larkana|Mardan|Mingora|Mirpur|Multan|Muzaffarabad|Nawabshah|Okara|Peshawar|Quetta
+  |Rahim Yar Khan|Rawalpindi|Sahiwal|Sargodha|Sheikhupura|Sialkot|Sukkur|Wah Cantonment`
+    .split("|")
+    .map((c) => [c.trim().toLowerCase(), c.trim()]),
+);
+const cityName = z
+  .string()
+  .transform((c) => CITIES.get(c.trim().replace(/\s+/g, " ").toLowerCase()))
+  .refine((c) => c !== undefined, "not a supported city");
 const NewHandyman = z.object({
   name: z.string().trim().min(2).max(60),
   phone: z.string(),
-  city: label,
+  city: cityName,
   category: label,
 });
 const ListQuery = z.object({
-  city: label,
+  city: cityName,
   category: z.union([label, z.array(label)]).optional(),
   sort: z.enum(["rating", "new"]).optional().default("rating"),
 });
@@ -100,7 +113,7 @@ export async function handymanRoutes(app: FastifyInstance) {
   });
 
   app.get("/handymen/categories", async (req) => {
-    const { city } = parse(z.object({ city: label }), req.query);
+    const { city } = parse(z.object({ city: cityName }), req.query);
     const { rows } = await pool.query(
       `SELECT category AS name, count(*)::int AS count FROM handymen WHERE city = $1
        GROUP BY category ORDER BY count DESC, category`,

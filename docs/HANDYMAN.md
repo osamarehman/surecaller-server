@@ -11,8 +11,10 @@ filtered by city then category, with 1–5 star ratings and written reviews.
 - **Review**: `rating` (1–5), `text` (0–500 chars), `author` (the name the reviewer chose, or
   `null` for Anonymous), `createdAt`, `mine` (true on the caller's own review). One review per member
   per handyman: posting again replaces it. Member ids never leave the server.
-- City and category are free text, trimmed and title-cased on the server ("lahore " → "Lahore",
-  "ac technician" → "Ac Technician"). The app suggests the built-in categories: Electrician,
+- City is one of a fixed list of 33 cities (`CITIES` in `src/routes/handymen.ts`, the same list as the app's
+  dropdown); any other city is a 400 `invalid_request`. Matching ignores case and extra spaces.
+- Category is free text, trimmed and title-cased ("solar fitter" → "Solar Fitter"). Built-in
+  categories always keep their own spelling ("ac technician" or "AC Technician" → "AC Technician"). The app suggests the built-in categories: Electrician,
   Plumber, Carpenter, Painter, AC Technician, Mechanic, Mason, Welder, Cleaner. A user may type any
   other category; it shows up for everyone in that city once one listing uses it.
 - A number on the opt-out list (`/opt-out`) can't be listed.
