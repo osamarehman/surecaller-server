@@ -56,6 +56,16 @@ describe('contacts sync and lookup', () => {
     });
   });
 
+  it('logs whether each lookup found a name', async () => {
+    await api(h, 'POST', '/v1/contacts/sync', ali.token, { contacts: [{ phone: '+923007770003', name: 'Found Name' }] });
+    await api(h, 'GET', '/v1/lookup/+923007770003', sara.token);
+    await api(h, 'GET', '/v1/lookup/+923007770004', sara.token);
+    const found = async (p: string) =>
+      (await h.pool.query('SELECT found FROM lookups WHERE phone_hash = $1', [vault().index(p)])).rows.map((r) => r.found);
+    expect(await found('+923007770003')).toEqual([true]);
+    expect(await found('+923007770004')).toEqual([false]);
+  });
+
   it('breaks name ties by most recent', async () => {
     await api(h, 'POST', '/v1/contacts/sync', ali.token, { contacts: [{ phone: '+923007770001', name: 'Ali Khan' }] });
     await new Promise((r) => setTimeout(r, 20));

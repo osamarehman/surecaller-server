@@ -344,8 +344,14 @@ export async function buildLookup(
   phone: string,
   opts: { threshold: number; familyId: string; logUserId?: string; spamRaw?: Map<string, RawSpam> },
 ): Promise<Lookup> {
-  if (opts.logUserId) {
-    await pool.query('INSERT INTO lookups (phone_hash, user_id) VALUES ($1, $2)', [vault().index(phone), opts.logUserId]);
-  }
-  return (await buildLookups(pool, [phone], opts.threshold, opts.spamRaw, opts.familyId))[0];
+  // Logged before building so callsToday counts this call; `found` is filled in after.
+  const logged = opts.logUserId
+    ? await pool.query<{ id: string }>('INSERT INTO lookups (phone_hash, user_id) VALUES ($1, $2) RETURNING id', [
+        vault().index(phone),
+        opts.logUserId,
+      ])
+    : null;
+  const lookup = (await buildLookups(pool, [phone], opts.threshold, opts.spamRaw, opts.familyId))[0];
+  if (logged) await pool.query('UPDATE lookups SET found = $2 WHERE id = $1', [logged.rows[0].id, lookup.name !== null]);
+  return lookup;
 }
