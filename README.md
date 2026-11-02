@@ -31,6 +31,10 @@ must share your changes with them under the same licence.
   Nobody, including the server admin, can list or export anyone's address book. A name is
   only returned to someone who already has the number and looks it up, and lookups are
   rate limited.
+- **Offline name pack (optional, `PACK_KEY`).** With `PACK_KEY` set, contact, suggestion and
+  directory rows also keep the number sealed under that separate key, so the server can build
+  an encrypted pack that phones download for offline caller ID. Each entry opens only with its
+  number, through a slow Argon2id hash. See [`src/pack.ts`](src/pack.ts) and `docs/API.md`.
 - **What it does not do.** Caller ID needs the server to answer "whose number is this?", so
   this is not end-to-end encryption: a server holding `CONTACTS_KEY` can answer a lookup for
   any number it is asked about.
@@ -84,6 +88,8 @@ Set at least:
   characters, or the server won't start).
 - `CONTACTS_KEY`: `openssl rand -hex 32`. Encrypts shared contacts at rest; back it up, it can't
   be recovered.
+- `PACK_KEY` (optional): `openssl rand -hex 32`, different from `CONTACTS_KEY`. Turns on the
+  offline name pack.
 - `POSTGRES_PASSWORD`: letters and digits only, e.g. from `openssl rand -hex 16`.
 - `PUBLIC_URL`: the address the phones use, e.g. `https://calls.example.com`.
 - `DOMAIN`: only if you use the built-in HTTPS (step 5), e.g. `calls.example.com`.

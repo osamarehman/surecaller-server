@@ -137,28 +137,34 @@ function rankNames(
   rows: { phone_hash: Buffer; name_enc: Buffer; at: Date }[],
   phoneOf: (h: Buffer) => string | undefined,
 ): Map<string, NameCount[]> {
-  const acc = new Map<string, Map<string, { count: number; at: number }>>();
+  const acc = new Map<string, { name: string; at: Date }[]>();
   for (const r of rows) {
     const phone = phoneOf(r.phone_hash);
     const opened = phone ? vault().open(phone, r.name_enc) : null;
     const name = opened === null ? null : cleanName(opened);
     if (!phone || name === null) continue;
     let names = acc.get(phone);
-    if (!names) acc.set(phone, (names = new Map()));
+    if (!names) acc.set(phone, (names = []));
+    names.push({ name, at: r.at });
+  }
+  const out = new Map<string, NameCount[]>();
+  for (const [phone, names] of acc) out.set(phone, rankByCount(names));
+  return out;
+}
+
+/** Ranks the (already cleaned) names saved for one number: English spelling, most people, most recent. */
+export function rankByCount(items: { name: string; at: Date }[]): NameCount[] {
+  const names = new Map<string, { count: number; at: number }>();
+  for (const { name, at } of items) {
     const n = names.get(name);
     if (n) {
       n.count++;
-      n.at = Math.max(n.at, r.at.getTime());
-    } else names.set(name, { count: 1, at: r.at.getTime() });
+      n.at = Math.max(n.at, at.getTime());
+    } else names.set(name, { count: 1, at: at.getTime() });
   }
-  const out = new Map<string, NameCount[]>();
-  for (const [phone, names] of acc) {
-    out.set(
-      phone,
-      [...names].sort((a, b) => latin(b[0]) - latin(a[0]) || b[1].count - a[1].count || b[1].at - a[1].at).map(([name, x]) => ({ name: romanize(name), count: x.count })),
-    );
-  }
-  return out;
+  return [...names]
+    .sort((a, b) => latin(b[0]) - latin(a[0]) || b[1].count - a[1].count || b[1].at - a[1].at)
+    .map(([name, x]) => ({ name: romanize(name), count: x.count }));
 }
 
 /**
@@ -230,7 +236,7 @@ export async function refreshSpamForUser(
   await refreshSpamState(db, phones, threshold);
 }
 
-interface NameCount {
+export interface NameCount {
   name: string;
   count: number;
 }

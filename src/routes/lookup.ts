@@ -6,6 +6,7 @@ import { tooManyRequests } from '../errors.js';
 import { parse, userKey } from '../http.js';
 import { buildLookup, buildLookups, refreshSpamState } from '../lookup.js';
 import { vault } from '../vault.js';
+import { sealPhoneOrNull } from '../pack.js';
 import { normalizePhone, requirePhone } from '../phone.js';
 
 export const CATEGORIES = ['scam', 'telemarketing', 'robocall', 'harassment', 'other'] as const;
@@ -93,10 +94,11 @@ export async function lookupRoutes(app: FastifyInstance) {
     const b = parse(NameBody, req.body);
     const phone = requirePhone(b.phone, cfg.defaultRegion);
     await pool.query(
-      `INSERT INTO name_suggestions (user_id, phone_hash, name_enc)
-       SELECT $1, $2, $3 WHERE NOT EXISTS (SELECT 1 FROM opt_outs WHERE phone_hash = $2)
-       ON CONFLICT (user_id, phone_hash) DO UPDATE SET name_enc = EXCLUDED.name_enc, created_at = now()`,
-      [req.user.id, vault().index(phone), vault().seal(phone, b.name)],
+      `INSERT INTO name_suggestions (user_id, phone_hash, name_enc, phone_enc)
+       SELECT $1, $2, $3, $4 WHERE NOT EXISTS (SELECT 1 FROM opt_outs WHERE phone_hash = $2)
+       ON CONFLICT (user_id, phone_hash) DO UPDATE SET name_enc = EXCLUDED.name_enc,
+         phone_enc = coalesce(EXCLUDED.phone_enc, name_suggestions.phone_enc), created_at = now()`,
+      [req.user.id, vault().index(phone), vault().seal(phone, b.name), sealPhoneOrNull(phone)],
     );
     return buildLookup(pool, phone, { threshold, familyId: req.user.family_id });
   });

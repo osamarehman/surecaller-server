@@ -2,8 +2,10 @@ import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { createPool } from './db.js';
 import { migrate } from './migrate.js';
+import { PackKeyMismatch, reconcilePack } from './pack-build.js';
 
 const PRUNE_EVERY_MS = 6 * 60 * 60 * 1000;
+const PACK_EVERY_MS = 15 * 60 * 1000;
 
 async function waitForDb(pool: ReturnType<typeof createPool>, log: (m: string) => void) {
   for (let attempt = 1; ; attempt++) {
@@ -67,11 +69,36 @@ async function main() {
   const timer = setInterval(prune, PRUNE_EVERY_MS);
   timer.unref();
 
+  // Offline name pack (only with PACK_KEY): rebuild changed entries every 15 minutes.
+  let packTimer: NodeJS.Timeout | undefined;
+  if (cfg.packKey) {
+    let running = false;
+    const pack = async () => {
+      if (running) return;
+      running = true;
+      try {
+        const r = await reconcilePack(pool);
+        if (r && (r.upserted || r.deleted || r.purged)) {
+          log(`name pack: ${r.entries} entries, ${r.upserted} updated, ${r.deleted} deleted, ${r.hashed} hashed, ${r.purged} purged in ${r.ms} ms`);
+        }
+      } catch (err) {
+        if (err instanceof PackKeyMismatch) app.log.error(`${err.message}. Restore the original PACK_KEY in .env.`);
+        else app.log.error({ err }, 'name pack reconcile failed');
+      } finally {
+        running = false;
+      }
+    };
+    setTimeout(pack, 30_000).unref();
+    packTimer = setInterval(pack, PACK_EVERY_MS);
+    packTimer.unref();
+  }
+
   await app.listen({ port: cfg.port, host: cfg.host });
 
   const shutdown = async (sig: string) => {
     log(`${sig} received, shutting down`);
     clearInterval(timer);
+    clearInterval(packTimer);
     await app.close();
     await pool.end();
     process.exit(0);

@@ -3,6 +3,7 @@ import type { CountryCode } from 'libphonenumber-js';
 import { withTx } from './db.js';
 import { normalizePhone } from './phone.js';
 import { vault } from './vault.js';
+import { sealPhoneOrNull } from './pack.js';
 
 export interface DirectoryEntry {
   phone: string;
@@ -17,23 +18,28 @@ export interface DirectoryEntry {
 export async function importDirectory(pool: pg.Pool, entries: Iterable<DirectoryEntry>, region: CountryCode) {
   const v = vault();
   const seen = new Set<string>();
-  const rows: { h: Buffer; e: Buffer; c: string | null }[] = [];
+  const rows: { h: Buffer; e: Buffer; c: string | null; p: Buffer | null }[] = [];
   for (const x of entries) {
     const phone = normalizePhone(x.phone, region);
     const name = x.name?.trim().slice(0, 100);
     if (!phone || !name || seen.has(phone)) continue;
     seen.add(phone);
-    rows.push({ h: v.index(phone), e: v.seal(phone, name), c: x.category?.replace(/_/g, ' ').slice(0, 60) || null });
+    rows.push({
+      h: v.index(phone),
+      e: v.seal(phone, name),
+      c: x.category?.replace(/_/g, ' ').slice(0, 60) || null,
+      p: sealPhoneOrNull(phone), // for the offline name pack; null when PACK_KEY is not set
+    });
   }
   return withTx(pool, async (c) => {
     await c.query('TRUNCATE directory');
     for (let i = 0; i < rows.length; i += 5000) {
       const b = rows.slice(i, i + 5000);
       await c.query(
-        `INSERT INTO directory (phone_hash, name_enc, category)
-         SELECT h, e, cat FROM unnest($1::bytea[], $2::bytea[], $3::text[]) AS t(h, e, cat)
+        `INSERT INTO directory (phone_hash, name_enc, category, phone_enc)
+         SELECT h, e, cat, pe FROM unnest($1::bytea[], $2::bytea[], $3::text[], $4::bytea[]) AS t(h, e, cat, pe)
          WHERE NOT EXISTS (SELECT 1 FROM opt_outs o WHERE o.phone_hash = t.h)`,
-        [b.map((r) => r.h), b.map((r) => r.e), b.map((r) => r.c)],
+        [b.map((r) => r.h), b.map((r) => r.e), b.map((r) => r.c), b.map((r) => r.p)],
       );
     }
     return (await c.query<{ n: number }>('SELECT count(*)::int AS n FROM directory')).rows[0].n;

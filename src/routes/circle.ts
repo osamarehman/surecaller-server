@@ -6,6 +6,7 @@ import { parse, requireAdmin, userKey } from '../http.js';
 import { refreshSpamForUser } from '../lookup.js';
 import { normalizePhone, requirePhone } from '../phone.js';
 import { vault } from '../vault.js';
+import { sealPhoneOrNull } from '../pack.js';
 import { canonicalInviteCode, newInviteCode } from '../tokens.js';
 import { assertKeepsAnAdmin, getUser, toMe, toUser, USER_SELECT, UUID_RE, type UserRow } from '../users.js';
 import { deleteMember } from './me.js';
@@ -211,6 +212,8 @@ export async function circleRoutes(app: FastifyInstance) {
     const v = vault();
     const hashes = phones.map((p) => v.index(p));
     const sealed = phones.map((p) => v.seal(p, byPhone.get(p)!));
+    // The number itself, sealed under PACK_KEY, so the offline name pack can be built (null = pack off).
+    const phoneEnc = phones.map(sealPhoneOrNull);
     // Replace the stored set in place: drop numbers no longer sent, upsert the
     // rest (each stamped with this sync's time, as a full rewrite would).
     await withTx(pool, async (c) => {
@@ -221,11 +224,12 @@ export async function circleRoutes(app: FastifyInstance) {
       if (phones.length) {
         // A number that stays in the address book keeps its family_only flag.
         await c.query(
-          `INSERT INTO contacts (user_id, phone_hash, name_enc)
-           SELECT $1, h, e FROM unnest($2::bytea[], $3::bytea[]) AS t(h, e)
+          `INSERT INTO contacts (user_id, phone_hash, name_enc, phone_enc)
+           SELECT $1, h, e, pe FROM unnest($2::bytea[], $3::bytea[], $4::bytea[]) AS t(h, e, pe)
            WHERE NOT EXISTS (SELECT 1 FROM opt_outs o WHERE o.phone_hash = t.h)
-           ON CONFLICT (user_id, phone_hash) DO UPDATE SET name_enc = EXCLUDED.name_enc, updated_at = now()`,
-          [req.user.id, hashes, sealed],
+           ON CONFLICT (user_id, phone_hash) DO UPDATE SET name_enc = EXCLUDED.name_enc,
+             phone_enc = coalesce(EXCLUDED.phone_enc, contacts.phone_enc), updated_at = now()`,
+          [req.user.id, hashes, sealed, phoneEnc],
         );
       }
     });

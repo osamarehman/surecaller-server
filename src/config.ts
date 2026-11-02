@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { CountryCode } from 'libphonenumber-js';
+import { createPackVault } from './pack.js';
 import { createVault } from './vault.js';
 
 export const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -13,6 +14,8 @@ export interface Config {
   adminCode: string | null;
   /** 64 hex chars; encrypts shared contact names at rest (src/vault.ts). */
   contactsKey: string;
+  /** 64 hex chars; seals numbers for the offline name pack (src/pack.ts). null = pack off. */
+  packKey: string | null;
   defaultRegion: CountryCode;
   spamThreshold: number;
   publicUrl: string | null;
@@ -67,6 +70,12 @@ function trustProxyEnv(): boolean | number | string {
 /** Throws when the config is unsafe to run with. */
 export function validateConfig(cfg: Config): Config {
   createVault(cfg.contactsKey); // throws on a missing or malformed CONTACTS_KEY
+  if (cfg.packKey !== null) {
+    createPackVault(cfg.packKey); // throws on a malformed PACK_KEY
+    if (cfg.packKey.toLowerCase() === cfg.contactsKey.toLowerCase()) {
+      throw new Error('PACK_KEY must differ from CONTACTS_KEY (openssl rand -hex 32)');
+    }
+  }
   if (cfg.adminCode !== null) {
     if (cfg.adminCode.length < MIN_ADMIN_CODE_LENGTH) {
       throw new Error(`ADMIN_CODE must be at least ${MIN_ADMIN_CODE_LENGTH} characters (try \`openssl rand -hex 12\`)`);
@@ -113,6 +122,7 @@ export function loadConfig(overrides: Partial<Config> = {}): Config {
     databaseUrl: databaseUrlFromEnv(),
     adminCode: process.env.ADMIN_CODE?.trim() || null,
     contactsKey: process.env.CONTACTS_KEY?.trim() ?? '',
+    packKey: process.env.PACK_KEY?.trim() || null,
     defaultRegion: (process.env.DEFAULT_REGION?.trim().toUpperCase() || 'PK') as CountryCode,
     spamThreshold: Math.max(1, intEnv('SPAM_THRESHOLD', 2)),
     publicUrl: process.env.PUBLIC_URL?.trim().replace(/\/+$/, '') || null,

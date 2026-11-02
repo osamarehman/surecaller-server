@@ -12,11 +12,14 @@
 import { loadConfig } from '../config.js';
 import { createPool } from '../db.js';
 import { deleteMember } from '../routes/me.js';
-import { initVault, vault } from '../vault.js';
+import { initPack } from '../pack.js';
+import { optOutNumber } from '../privacy.js';
+import { initVault } from '../vault.js';
 
 const [cmd = 'list', idArg] = process.argv.slice(2);
 const cfg = loadConfig();
 initVault(cfg.contactsKey);
+initPack(cfg.packKey);
 const pool = createPool(cfg.databaseUrl);
 
 type Req = { id: string; kind: 'account' | 'remove'; phone: string; email: string; created_at: Date };
@@ -43,14 +46,17 @@ async function main() {
     if (user) await deleteMember(pool, user.id, cfg.spamThreshold);
     console.log(user ? `Deleted the account for ${r.phone}.` : `No account for ${r.phone}; nothing to delete.`);
   } else if (cmd === 'apply') {
-    const h = vault().index(r.phone);
-    await pool.query('INSERT INTO opt_outs (phone_hash) VALUES ($1) ON CONFLICT DO NOTHING', [h]);
-    const c = await pool.query('DELETE FROM contacts WHERE phone_hash = $1', [h]);
-    const n = await pool.query('DELETE FROM name_suggestions WHERE phone_hash = $1', [h]);
-    const d = await pool.query('DELETE FROM directory WHERE phone_hash = $1', [h]);
+    const x = await optOutNumber(pool, r.phone);
     console.log(
-      `Opted out ${r.phone}: removed ${c.rowCount} shared contacts, ${n.rowCount} name suggestions and ${d.rowCount} directory entries.`,
+      `Opted out ${r.phone}: removed ${x.contacts} shared contacts, ${x.suggestions} name suggestions and ${x.directory} directory entries.`,
     );
+    if (cfg.packKey) {
+      console.log(
+        x.pack
+          ? `Name pack updated: ${x.pack.deleted} entries deleted.`
+          : 'Name pack: a rebuild is already running; the next one (within 15 minutes) removes the name.',
+      );
+    }
   }
   await pool.query('DELETE FROM privacy_requests WHERE id = $1', [r.id]);
   console.log(`Request #${r.id} closed. Email ${r.email} to confirm.`);

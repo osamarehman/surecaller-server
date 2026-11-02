@@ -11,16 +11,19 @@ import { authenticate } from './http.js';
 import { createGoogleVerifier, type GoogleVerifier } from './email.js';
 import { createMailer, type Mailer } from './mail.js';
 import { initVault } from './vault.js';
+import { initPack } from './pack.js';
 import type { UserRow } from './users.js';
 import { publicRoutes } from './routes/public.js';
 import { meRoutes } from './routes/me.js';
 import { circleRoutes } from './routes/circle.js';
 import { lookupRoutes } from './routes/lookup.js';
 import { syncRoutes } from './routes/sync.js';
+import { packRoutes } from './routes/pack.js';
 import { eventRoutes } from './routes/events.js';
 import { checkRoutes } from './routes/check.js';
 import { telemetryAdminRoutes, telemetryIngestRoutes } from './routes/telemetry.js';
 import { feedbackAdminRoutes, feedbackPublicRoutes } from './routes/feedback.js';
+import { handymanRoutes } from './routes/handymen.js';
 
 // 20 000 contacts at ~100 bytes each is ~2 MB; leave generous headroom.
 const BODY_LIMIT = 10 * 1024 * 1024;
@@ -46,6 +49,7 @@ export async function buildApp(
   });
 
   initVault(cfg.contactsKey);
+  initPack(cfg.packKey);
   app.decorate('ctx', {
     cfg,
     pool,
@@ -162,10 +166,12 @@ export async function buildApp(
     await v1.register(circleRoutes);
     await v1.register(lookupRoutes);
     await v1.register(syncRoutes);
+    await v1.register(packRoutes);
     await v1.register(eventRoutes);
     await v1.register(checkRoutes);
     await v1.register(telemetryAdminRoutes);
     await v1.register(feedbackAdminRoutes);
+    await v1.register(handymanRoutes);
   }, { prefix: '/v1' });
 
   return app;

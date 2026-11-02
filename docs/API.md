@@ -129,7 +129,7 @@ Errors:
 
 ## Me
 
-- `GET /v1/me` → `User` plus `"email"` (string or null)
+- `GET /v1/me` → `User` plus `"email"` (string or null) and `"familyId"` (the app refetches its offline name pack when it changes)
 - `PATCH /v1/me` body (all optional): `{ "name", "status", "shareContacts", "protection": {...}, "fcmToken" }` → `User`.
   To add or change the email, send `"googleIdToken"`, or `"email"` with an `"emailCode"` from `POST /v1/email-codes`
   (`403 invalid_email_code`, `409 email_taken`). Existing accounts use this to add a recovery email.
@@ -242,6 +242,72 @@ not-spam votes ≥ `SPAM_THRESHOLD` (2), or any admin reported it; `suspected` a
 ```
 Empty `since` = full snapshot. Rows whose label dropped to `none` or were removed come back with
 `"deleted": true`. The app stores `serverTime` and sends it next time.
+
+## Offline name pack
+
+The phone keeps an encrypted copy of every caller-ID name it may see, so caller ID works offline.
+Only on servers with `PACK_KEY` set (64 hex characters, `openssl rand -hex 32`, different from
+`CONTACTS_KEY`); without it `GET /v1/pack` answers `404 pack_disabled`.
+
+Each entry holds one number's best answer (same priority and visibility as `GET /v1/lookup`).
+The pack holds no numbers: a phone finds and opens an entry only with the number in hand.
+
+```
+h    = Argon2id(password = E.164 phone (UTF-8), salt, t, m KiB, p, len = 32)   // salt and cost from the header
+tag  = HMAC-SHA256(key = h, "surecaller/pack/tag")[0..8)
+key  = HMAC-SHA256(key = h, "surecaller/pack/key")
+blob = nonce(12) || AES-256-GCM(key, nonce, plaintext, aad = tag) || gcmTag(16)
+plaintext = {"n":"Ali Raza","s":"contacts","c":null,"k":3,"m":false}   // + trailing spaces
+```
+
+The plaintext JSON is padded with trailing spaces to a multiple of 32 bytes (so blob sizes don't
+reveal name lengths): trim it, or use a parser that ignores trailing whitespace.
+
+`n` name, `s` `member` | `contacts` | `directory` | `suggested`, `c` directory category or null,
+`k` how many shared contacts are behind it, `m` true when the number is a member of your family.
+Test vector (salt `000102…0f`, t=2, m=16384, p=1): `test/pack.test.ts`.
+
+Scopes: a **global** entry is everyone's answer. A **family** entry is your family's own answer
+for a number where it differs (your family's members, contacts shared only with your family);
+prefer it over a global entry with the same tag. Opted-out numbers have no entry.
+
+### `GET /v1/pack?since=<seq>&limit=<n>`
+`application/octet-stream`. `since` absent or `0` = full download (tombstones left out).
+`limit` 1–20000, default 20000. All integers big-endian.
+
+```
+header (44 bytes):
+  "SCNP" | u8 version = 1 | u8 flags (bit0 reset, bit1 more) |
+  u32 saltId | 16B salt | u8 t | u32 mKiB | u8 p | u64 nextSince | u32 count
+entry × count:
+  u64 id | u64 seq | u8 kind (0 upsert global, 1 upsert family, 2 delete) |
+  upsert only: 8B tag | u16 blobLen | blob
+```
+
+- Rows with `seq > since` that are global or your family's, in `seq` order. An `id` is stable
+  for its number and scope: an upsert replaces the row with that id, a delete removes it.
+  `id` and `seq` come from server-wide sequences shared by every family and generation, so
+  gaps between the values one member sees are normal.
+- On a full download `nextSince` also skips tombstones after the last row sent.
+- `reset`: wipe the local pack; this page starts from 0. Set for `since=0`, when `since` is
+  behind purged tombstones (kept 60 days) or a new salt generation, and on the first download
+  after the member moved to another family (the server remembers the family it last served).
+- Belt and braces on the phone: when `saltId` or `GET /v1/me` `familyId` changed since the last
+  sync, wipe and fetch from `since=0`.
+- `more`: another page follows; call again with `since = nextSince`. Store `nextSince` only after
+  the page is applied.
+- Quota: every row served (full downloads and deltas alike) counts against a per-member budget
+  per UTC day of 5 × the live entries that member can see, at least 50 000. A page is cut short
+  (with `more`) at the budget; past it → `429 pack_quota` until the next UTC day.
+- `503 pack_key_mismatch`: the server's `PACK_KEY` is not the one the pack was built with; keep
+  the local pack and retry later.
+
+The server rebuilds changed entries every 15 minutes, after a directory import and after a
+privacy opt-out (`node dist/cli/pack.js reconcile`). It refuses to build or serve when
+`PACK_KEY` changed (a canary in `pack_meta`), and writes nothing when more than 2% of the sealed
+numbers fail to open. `node dist/cli/pack.js rotate` builds a new salt generation while the old
+one keeps serving, then swaps it in: every phone refetches. Argon2 runs on `PACK_WORKERS`
+threads (default: CPUs − 1, at most 4).
 
 ### Family block list (one per family)
 - `POST /v1/blocks` `{ "type", "value", "label"? }` → block row. `number` = E.164, `prefix` = E.164 prefix
