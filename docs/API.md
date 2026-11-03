@@ -130,6 +130,9 @@ Errors:
 ## Me
 
 - `GET /v1/me` → `User` plus `"email"` (string or null) and `"familyId"` (the app refetches its offline name pack when it changes)
+  and `"contactsResyncNeeded"`: true while some of the caller's shared contacts were uploaded before
+  the offline name pack existed. The app should then upload its full address book once
+  (`POST /v1/contacts/sync`, skipping the unchanged-address-book check); it turns false after that.
 - `PATCH /v1/me` body (all optional): `{ "name", "status", "shareContacts", "protection": {...}, "fcmToken" }` → `User`.
   To add or change the email, send `"googleIdToken"`, or `"email"` with an `"emailCode"` from `POST /v1/email-codes`
   (`403 invalid_email_code`, `409 email_taken`). Existing accounts use this to add a recovery email.

@@ -6,7 +6,7 @@ import { parse, requireAdmin, userKey } from '../http.js';
 import { refreshSpamForUser } from '../lookup.js';
 import { normalizePhone, requirePhone } from '../phone.js';
 import { vault } from '../vault.js';
-import { sealPhoneOrNull } from '../pack.js';
+import { requestPackRebuild, sealPhoneOrNull } from '../pack.js';
 import { canonicalInviteCode, newInviteCode } from '../tokens.js';
 import { assertKeepsAnAdmin, getUser, toMe, toUser, USER_SELECT, UUID_RE, type UserRow } from '../users.js';
 import { deleteMember } from './me.js';
@@ -233,6 +233,7 @@ export async function circleRoutes(app: FastifyInstance) {
         );
       }
     });
+    if (phoneEnc.some(Boolean)) requestPackRebuild(); // pack entries now, not at the next 15-min run
     return { stored: phones.length };
   });
 

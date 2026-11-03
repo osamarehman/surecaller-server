@@ -3,6 +3,7 @@ import { loadConfig } from './config.js';
 import { createPool } from './db.js';
 import { migrate } from './migrate.js';
 import { PackKeyMismatch, reconcilePack } from './pack-build.js';
+import { setPackRebuilder } from './pack.js';
 
 const PRUNE_EVERY_MS = 6 * 60 * 60 * 1000;
 const PACK_EVERY_MS = 15 * 60 * 1000;
@@ -73,8 +74,9 @@ async function main() {
   let packTimer: NodeJS.Timeout | undefined;
   if (cfg.packKey) {
     let running = false;
+    let again = false;
     const pack = async () => {
-      if (running) return;
+      if (running) return void (again = true); // run once more when this one ends
       running = true;
       try {
         const r = await reconcilePack(pool);
@@ -86,8 +88,15 @@ async function main() {
         else app.log.error({ err }, 'name pack reconcile failed');
       } finally {
         running = false;
+        if (again) (again = false), void pack();
       }
     };
+    // A contact upload asks for a rebuild: run 5 s later, so a burst of uploads shares one run.
+    let soon: NodeJS.Timeout | undefined;
+    setPackRebuilder(() => {
+      soon ??= setTimeout(() => ((soon = undefined), void pack()), 5_000);
+      soon.unref();
+    });
     setTimeout(pack, 30_000).unref();
     packTimer = setInterval(pack, PACK_EVERY_MS);
     packTimer.unref();

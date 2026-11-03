@@ -144,6 +144,13 @@ export function createPackVault(keyHex: string): PackVault {
 // Like vault(): one process-wide PACK_KEY, set by initPack before the app serves requests.
 let current: PackVault | null = null;
 
+let rebuild: () => void = () => {};
+/** server.ts registers the pack job here; routes call requestPackRebuild after new pack data. */
+export const setPackRebuilder = (fn: () => void) => {
+  rebuild = fn;
+};
+export const requestPackRebuild = () => rebuild();
+
 export function initPack(keyHex: string | null): PackVault | null {
   current = keyHex ? createPackVault(keyHex) : null;
   return current;

@@ -7,6 +7,7 @@ import { refreshSpamForUser } from '../lookup.js';
 import { emailTaken, EmailProof, proveEmail, spendEmailCode } from '../email.js';
 import { notFound } from '../errors.js';
 import { assertKeepsAnAdmin, getUser, toMe } from '../users.js';
+import { packVault } from '../pack.js';
 
 const PatchMe = z.object({
   name: z.string().trim().min(1).max(60).optional(),
@@ -54,7 +55,15 @@ export async function deleteMember(pool: pg.Pool, userId: string, threshold: num
 export async function meRoutes(app: FastifyInstance) {
   const { cfg, pool } = app.ctx;
 
-  app.get('/me', async (req) => toMe((await getUser(pool, req.user.id))!));
+  app.get('/me', async (req) => {
+    const me = toMe((await getUser(pool, req.user.id))!);
+    // Contacts uploaded before the pack existed lack phone_enc; one full re-upload fixes them.
+    const { rows } = await pool.query<{ r: boolean }>(
+      'SELECT EXISTS (SELECT 1 FROM contacts WHERE user_id = $1 AND phone_enc IS NULL) AS r',
+      [req.user.id],
+    );
+    return { ...me, contactsResyncNeeded: packVault() !== null && rows[0].r };
+  });
 
   app.patch('/me', async (req) => {
     const b = parse(PatchMe, req.body);

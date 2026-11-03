@@ -154,6 +154,20 @@ describe('GET /v1/pack', () => {
     await h.close();
   });
 
+  it('asks for a contact re-upload only while rows lack phone_enc', async () => {
+    expect((await api(h, 'GET', '/v1/me', a.token)).body.contactsResyncNeeded).toBe(false);
+    await h.pool.query('UPDATE contacts SET phone_enc = NULL WHERE phone_hash = $1', [vault().index(X)]);
+    expect((await api(h, 'GET', '/v1/me', a.token)).body.contactsResyncNeeded).toBe(true);
+    await api(h, 'POST', '/v1/contacts/sync', a.token, {
+      contacts: [
+        { phone: X, name: 'Ali Raza' },
+        { phone: Y, name: 'Bilal' },
+        { phone: Z, name: 'Zed' },
+      ],
+    });
+    expect((await api(h, 'GET', '/v1/me', a.token)).body.contactsResyncNeeded).toBe(false);
+  });
+
   it('stores numbers sealed under PACK_KEY', async () => {
     const { rows } = await h.pool.query<{ phone_enc: Buffer }>('SELECT phone_enc FROM contacts WHERE phone_hash = $1', [
       vault().index(X),
