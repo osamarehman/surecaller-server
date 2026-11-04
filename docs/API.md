@@ -141,6 +141,16 @@ Errors:
   `409 last_admin` if the caller is the only admin and other members remain (make someone
   else admin first).
 
+## Backup
+
+The app's local data (block rules, notes, favourites, settings), so a reinstall or a move to
+another build restores it. One backup per member; the server stores it sealed and never reads it.
+
+- `PUT /v1/backup` body `{ "data": { ... } }` (a JSON object, at most 1 MB) → `{ "updatedAt": "..." }`.
+  Replaces the previous backup. `413 too_large` over 1 MB; 60 per hour.
+- `GET /v1/backup` → `{ "data": { ... }, "updatedAt": "..." }`, or `404 no_backup`.
+- `DELETE /v1/backup` → `204`. Deleting the account deletes the backup too.
+
 ## Circle
 
 All of these act on the caller's family only; another family's member is `404`.

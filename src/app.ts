@@ -25,6 +25,7 @@ import { telemetryAdminRoutes, telemetryIngestRoutes } from './routes/telemetry.
 import { feedbackAdminRoutes, feedbackPublicRoutes } from './routes/feedback.js';
 import { adminRoutes } from './routes/admin.js';
 import { handymanRoutes } from './routes/handymen.js';
+import { backupRoutes } from './routes/backup.js';
 
 // 20 000 contacts at ~100 bytes each is ~2 MB; leave generous headroom.
 const BODY_LIMIT = 10 * 1024 * 1024;
@@ -173,6 +174,7 @@ export async function buildApp(
     await v1.register(telemetryAdminRoutes);
     await v1.register(feedbackAdminRoutes);
     await v1.register(handymanRoutes);
+    await v1.register(backupRoutes);
     await v1.register(adminRoutes);
   }, { prefix: '/v1' });
 
