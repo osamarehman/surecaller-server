@@ -37,7 +37,7 @@ export const tidy = (s: string) => {
 
 const label = z.string().trim().min(2).max(40).transform(tidy);
 
-// The app's city dropdown sends exactly these; anything else is an old or modified client.
+// Suggested cities keep their spelling; any other place name is title-cased like a category.
 const CITIES = new Map(
   `Abbottabad|Bahawalpur|Chiniot|Dera Ghazi Khan|Faisalabad|Gilgit|Gujranwala|Gujrat|Hyderabad|Islamabad|Jhang
   |Jhelum|Karachi|Kasur|Lahore|Larkana|Mardan|Mingora|Mirpur|Multan|Muzaffarabad|Nawabshah|Okara|Peshawar|Quetta
@@ -47,13 +47,27 @@ const CITIES = new Map(
 );
 const cityName = z
   .string()
-  .transform((c) => CITIES.get(c.trim().replace(/\s+/g, " ").toLowerCase()))
-  .refine((c) => c !== undefined, "not a supported city");
+  .trim()
+  .min(2)
+  .max(40)
+  .regex(/^\p{L}[\p{L}\p{M} .'-]*$/u, "not a city name")
+  .transform(
+    (c) => CITIES.get(c.replace(/\s+/g, " ").toLowerCase()) ?? tidy(c),
+  );
+// Free text, spaces collapsed, case kept as typed ("DHA Phase 6").
+const area = z
+  .string()
+  .max(200)
+  .optional()
+  .default("")
+  .transform((a) => a.trim().replace(/\s+/g, " "))
+  .refine((a) => a.length <= 80, "area too long");
 const NewHandyman = z.object({
   name: z.string().trim().min(2).max(60),
   phone: z.string(),
   city: cityName,
   category: label,
+  area,
 });
 const ListQuery = z.object({
   city: cityName,
@@ -72,6 +86,7 @@ interface Row {
   phone: string;
   city: string;
   category: string;
+  area: string;
   rating: string | null;
   rating_count: number;
   created_at: Date;
@@ -87,6 +102,7 @@ const toHandyman = (r: Row) => ({
   phone: r.phone,
   city: r.city,
   category: r.category,
+  area: r.area || null,
   rating: r.rating === null ? null : Number(r.rating),
   ratingCount: r.rating_count,
   createdAt: r.created_at.toISOString(),
@@ -151,10 +167,12 @@ export async function handymanRoutes(app: FastifyInstance) {
       if (out.rowCount)
         throw conflict("opted_out", "This number asked not to be listed");
       const { rows } = await pool.query<{ id: string; created: boolean }>(
-        `INSERT INTO handymen (name, phone, city, category, added_by) VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (phone, city, category) DO UPDATE SET phone = EXCLUDED.phone
+        // A merge keeps the listing's area; it only fills one in when none was set.
+        `INSERT INTO handymen (name, phone, city, category, area, added_by) VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (phone, city, category) DO UPDATE
+           SET area = CASE WHEN handymen.area = '' THEN EXCLUDED.area ELSE handymen.area END
          RETURNING id, (xmax = 0) AS created`,
-        [b.name, phone, b.city, b.category, req.user.id],
+        [b.name, phone, b.city, b.category, b.area, req.user.id],
       );
       return reply
         .status(rows[0].created ? 201 : 200)

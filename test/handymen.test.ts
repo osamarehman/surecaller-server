@@ -71,7 +71,7 @@ describe("handyman directory", () => {
     const atlantis = {
       name: "Nowhere Fix",
       phone: "03001212123",
-      city: "Atlantis",
+      city: "12 Street",
       category: "Plumber",
     };
     expect((await add(atlantis)).status).toBe(400);
@@ -141,5 +141,42 @@ describe("handyman directory", () => {
     expect(
       (await api(h, "GET", "/v1/handymen/not-a-uuid", a.token)).status,
     ).toBe(404);
+  });
+
+  it("accepts a custom city and an optional service area", async () => {
+    // One admin per server: use a fresh one so this test stands alone.
+    const h2 = await createHarness();
+    const a = await registerAdmin(h2, "+923001110101", "Hina Malik");
+    const add = (body: object) => api(h2, "POST", "/v1/handymen", a.token, body);
+    const r = await add({
+      name: "Murree Electric",
+      phone: "03004445556",
+      city: "  murree  hills ",
+      category: "Electrician",
+      area: "  Mall Road,   Jhika Gali ",
+    });
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({ city: "Murree Hills", area: "Mall Road, Jhika Gali" });
+
+    // A merge keeps the area that was set first.
+    const again = await add({
+      name: "Murree Electric",
+      phone: "03004445556",
+      city: "Murree Hills",
+      category: "Electrician",
+      area: "Somewhere else",
+    });
+    expect(again.status).toBe(200);
+    expect(again.body.area).toBe("Mall Road, Jhika Gali");
+
+    // No area: null. Known cities keep their spelling.
+    const k = await add({ name: "Gulshan AC", phone: "03004445557", city: "KARACHI", category: "AC Technician" });
+    expect(k.body).toMatchObject({ city: "Karachi", area: null });
+
+    expect((await add({ name: "Long Area", phone: "03004445558", city: "Karachi", category: "Plumber", area: "x".repeat(81) })).status).toBe(400);
+
+    const list = await api(h2, "GET", "/v1/handymen?city=murree%20hills", a.token);
+    expect(list.body.handymen.map((x: { name: string }) => x.name)).toEqual(["Murree Electric"]);
+    await h2.close();
   });
 });
