@@ -53,7 +53,13 @@ export function toUser(row: UserRow) {
 
 /** The signed-in user's own view: adds fields other members don't see. */
 // familyId lets the app notice a family change and refetch its offline name pack.
-export const toMe = (row: UserRow) => ({ ...toUser(row), email: row.email, familyId: row.family_id });
+// isOperator: admin of the trusted family, so the app shows the server-wide Users list.
+export const toMe = (row: UserRow) => ({
+  ...toUser(row),
+  email: row.email,
+  familyId: row.family_id,
+  isOperator: row.is_admin && row.trusted,
+});
 
 export async function getUser(db: Client, id: string): Promise<UserRow | null> {
   const { rows } = await db.query<UserRow>(`${USER_SELECT} WHERE u.id = $1`, [id]);

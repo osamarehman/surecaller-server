@@ -133,6 +133,7 @@ Errors:
   and `"contactsResyncNeeded"`: true while some of the caller's shared contacts were uploaded before
   the offline name pack existed. The app should then upload its full address book once
   (`POST /v1/contacts/sync`, skipping the unchanged-address-book check); it turns false after that.
+  Also `"isOperator"` (true for an admin of the operator's family: the app then shows the Users list below)
 - `PATCH /v1/me` body (all optional): `{ "name", "status", "shareContacts", "protection": {...}, "fcmToken" }` → `User`.
   To add or change the email, send `"googleIdToken"`, or `"email"` with an `"emailCode"` from `POST /v1/email-codes`
   (`403 invalid_email_code`, `409 email_taken`). Existing accounts use this to add a recovery email.
@@ -437,6 +438,28 @@ retention window, most recent first.
 On the server, `docker compose exec api node dist/cli/logs.js` prints the same data in the
 terminal (see `backend/README.md`). Events older than `TELEMETRY_RETENTION_DAYS` (default 14)
 are deleted.
+
+## Users (operator only)
+
+The operator is an admin of the family `ADMIN_CODE` set up. Anyone else gets `403 forbidden`.
+
+### `GET /v1/admin/users`
+→ `{ "users": [ { "id", "name", "phone", "email", "isAdmin", "familyId", "trustedFamily",
+"familySize", "createdAt", "lastSeenAt", "appVersion", "device" } ] }` — everyone on the server,
+newest sign-up first. `appVersion` and `device` come from the user's latest telemetry (null if none).
+
+### `GET /v1/admin/users/:id/usage`
+→ `{ "user": {...}, "usage": {...}, "lookupsByDay": [ { "day": "YYYY-MM-DD", "lookups" } ], "devices": [...] }`
+
+- `user`: the list fields plus `status`, `shareContacts`, `protection`, `pushEnabled`.
+- `usage`: `lookups7d`, `lookups30d`, `sharedContacts`, `spamReports`, `notSpamVotes`,
+  `namesSuggested`, `linksReported`, `spamCallAlerts`, `scamSmsAlerts`, `sosSent`,
+  `handymenAdded`, `handymanReviews`, `packRows30d`, `errors7d`.
+- `lookupsByDay`: the last 14 days (UTC), oldest first, zero days included.
+- `devices`: `{ "installId", "appVersion", "device", "os", "lastSeenAt" }` per install in telemetry, newest first.
+
+Lookups are kept 30 days and telemetry `TELEMETRY_RETENTION_DAYS`, so older activity is not counted.
+`404` for an unknown id.
 
 ## Health
 - `GET /health` → `{ "ok": true, "version": "1.0.0" }`
