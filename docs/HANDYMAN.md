@@ -29,8 +29,8 @@ filtered by city then category, with 1–5 star ratings and written reviews.
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
 | GET | `/v1/handymen/cities` | | `{ cities: [{ name, count }] }` most listings first |
-| GET | `/v1/handymen/categories` | `?city=Lahore` | `{ categories: [{ name, count }] }` for that city |
-| GET | `/v1/handymen` | `?city=Lahore&category=Plumber` (category optional, repeatable) `&sort=rating\|new` | `{ handymen: [Handyman] }`, max 200 |
+| GET | `/v1/handymen/categories` | `?city=Lahore` (optional) | `{ categories: [{ name, count }] }` for that city, or across all cities |
+| GET | `/v1/handymen` | `?city=Lahore&category=Plumber` (city optional: no city = all cities; category optional, repeatable) `&sort=rating\|new` | `{ handymen: [Handyman] }`, max 200 |
 | POST | `/v1/handymen` | `{ name, phone, city, category, area? }` | `Handyman` (201 new, 200 when it merged into an existing listing) |
 | GET | `/v1/handymen/:id` | | `{ handyman: Handyman, reviews: [Review] }` newest first, max 100 |
 | PUT | `/v1/handymen/:id/review` | `{ rating, text?, author? }` (`author` null or missing = Anonymous) | `{ handyman, review }` |

@@ -70,7 +70,7 @@ const NewHandyman = z.object({
   area,
 });
 const ListQuery = z.object({
-  city: cityName,
+  city: cityName.optional(),
   category: z.union([label, z.array(label)]).optional(),
   sort: z.enum(["rating", "new"]).optional().default("rating"),
 });
@@ -129,11 +129,11 @@ export async function handymanRoutes(app: FastifyInstance) {
   });
 
   app.get("/handymen/categories", async (req) => {
-    const { city } = parse(z.object({ city: cityName }), req.query);
+    const { city } = parse(z.object({ city: cityName.optional() }), req.query);
     const { rows } = await pool.query(
-      `SELECT category AS name, count(*)::int AS count FROM handymen WHERE city = $1
+      `SELECT category AS name, count(*)::int AS count FROM handymen WHERE ($1::text IS NULL OR city = $1)
        GROUP BY category ORDER BY count DESC, category`,
-      [city],
+      [city ?? null],
     );
     return { categories: rows };
   });
@@ -142,10 +142,10 @@ export async function handymanRoutes(app: FastifyInstance) {
     const q = parse(ListQuery, req.query);
     const cats = q.category === undefined ? null : [q.category].flat();
     const { rows } = await pool.query<Row>(
-      `${SELECT} WHERE h.city = $1 AND ($2::text[] IS NULL OR h.category = ANY($2))
+      `${SELECT} WHERE ($1::text IS NULL OR h.city = $1) AND ($2::text[] IS NULL OR h.category = ANY($2))
        GROUP BY h.id ORDER BY ${q.sort === "new" ? "h.created_at DESC" : "rating DESC NULLS LAST, rating_count DESC, h.created_at DESC"}
        LIMIT 200`,
-      [q.city, cats],
+      [q.city ?? null, cats],
     );
     return { handymen: rows.map(toHandyman) };
   });

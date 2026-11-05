@@ -105,6 +105,12 @@ describe("handyman directory", () => {
       ).body.handymen,
     ).toHaveLength(1);
 
+    const all = await api(h, "GET", "/v1/handymen", b.token);
+    expect(all.body.handymen).toHaveLength(3);
+    expect(
+      (await api(h, "GET", "/v1/handymen/categories", b.token)).body.categories,
+    ).toHaveLength(3);
+
     const id = plumber.body.id;
     await api(h, "PUT", `/v1/handymen/${id}/review`, a.token, {
       rating: 5,
