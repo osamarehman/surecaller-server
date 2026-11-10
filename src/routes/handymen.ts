@@ -242,3 +242,41 @@ export async function handymanRoutes(app: FastifyInstance) {
     },
   );
 }
+
+// Trade words in English, Urdu script and Roman Urdu, checked in order: "AC mechanic" is an AC
+// technician, "raj mistri" a mason, before a bare "mechanic"/"mistri" counts as a mechanic.
+// ponytail: keyword list, extend it when a dry run misses a common spelling.
+const TRADES: [string, string[]][] = [
+  ["AC Technician", ["ac technician", "ac mechanic", "ac service", "ac wala", "ac", "a/c", "fridge", "refrigeration", "refrigerator", "اے سی", "فرج"]],
+  ["Mason", ["raj mistri", "rajmistri", "mason", "راج مستری", "مستری راج"]],
+  ["Electrician", ["electrician", "electrition", "electrican", "electric", "electrical", "bijli wala", "bijli", "wiring", "الیکٹریشن", "بجلی"]],
+  ["Plumber", ["plumber", "plumbar", "plumbing", "nalka", "پلمبر", "نلکا"]],
+  ["Carpenter", ["carpenter", "carpentar", "tarkhan", "tarkhaan", "wood work", "woodwork", "کارپینٹر", "ترکھان"]],
+  ["Painter", ["painter", "paint", "rang saz", "پینٹر", "رنگ ساز"]],
+  ["Welder", ["welder", "welding", "weldar", "ویلڈر", "ویلڈنگ"]],
+  ["Mechanic", ["mechanic", "mechenic", "mekanik", "mistri", "car mechanic", "bike mechanic", "workshop", "مکینک", "مستری"]],
+  ["Cleaner", ["cleaner", "cleaning", "sweeper", "safai", "jamadar", "maid", "صفائی"]],
+];
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&").replace(/ /g, "\\s*");
+const word = (k: string) => `(?<![\\p{L}\\p{N}])${esc(k)}(?![\\p{L}\\p{N}])`;
+const WALA = new RegExp(word("wala") + "|" + word("wale") + "|" + word("waly") + "|" + word("walay") + "|" + word("والا"), "giu");
+const MATCHERS = TRADES.map(([category, words]) => ({
+  category,
+  re: new RegExp(words.map(word).join("|"), "iu"),
+}));
+
+/** "Bilal AC wala" -> { category: "AC Technician", name: "Bilal", keyword: "AC" }; null when no trade word. */
+export function classifyTrade(contactName: string) {
+  for (const { category, re } of MATCHERS) {
+    const m = re.exec(contactName);
+    if (!m) continue;
+    const rest = contactName
+      .replace(m[0], " ")
+      .replace(WALA, " ")
+      .replace(/[()[\]\-_,.:|/]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return { category, name: rest.length >= 2 ? rest : contactName.trim(), keyword: m[0] };
+  }
+  return null;
+}

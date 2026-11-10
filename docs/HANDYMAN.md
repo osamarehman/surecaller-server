@@ -41,3 +41,19 @@ Errors use the usual `{ error, message }` shape: `invalid_request` (400), `not_f
 hour per member; reviews to 30 per hour.
 
 The `phone` field is shown so people can call. Listings are visible to signed-in members only.
+
+## Seeding from a member's contacts
+
+`src/cli/handymen-seed.ts` lists a member's own contacts whose saved name carries a trade word
+("Ali Plumber", "Bilal AC wala", "raj mistri Sadiq", Urdu script too) as handymen in one city. The
+trade word and "wala" are dropped from the shown name. It skips contacts without a stored number
+(not re-uploaded since the name pack), opted-out numbers and numbers already listed. Dry run by
+default; it prints each match with a masked number and the counts per category.
+
+```bash
+docker compose exec api node dist/cli/handymen-seed.js --user <id|phone> --city Hyderabad          # dry run
+docker compose exec api node dist/cli/handymen-seed.js --user <id|phone> --city Hyderabad --apply  # insert
+```
+
+The keyword list is `TRADES` in `src/routes/handymen.ts`; the classifier is tested in
+`test/handyman-seed.test.ts`. Words that also mean a relative ("masi") are left out on purpose.
