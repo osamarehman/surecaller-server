@@ -3,10 +3,12 @@
 The open source backend behind SureCaller, a caller ID and spam blocking app for Android.
 This is the code the official app's server runs.
 
+**Get the app: [SureCaller on Google Play](https://play.google.com/store/apps/details?id=com.surecaller.app)**
+
 Stack: Node.js 24, TypeScript, Fastify, PostgreSQL 17. It runs with Docker Compose.
 Licence: [AGPL-3.0](LICENSE). The full HTTP API is documented in [`docs/API.md`](docs/API.md).
 
-## What it does
+## What the server does
 
 - **Caller ID** from contacts that users share, with name suggestions and an optional
   business directory for numbers nobody has saved.
@@ -29,6 +31,73 @@ Licence: [AGPL-3.0](LICENSE). The full HTTP API is documented in [`docs/API.md`]
 - **Operator tools**: phone logs and crash reports, a user list with usage, account deletion
   requests, and app updates for builds installed outside Google Play.
 
+## The app: features and benefits
+
+The official Android app talks to this server. Free for Android 10 and up.
+
+**Know who is calling**
+
+- **Caller card.** A card over the incoming call shows the name other people saved for that
+  number, even when it isn't in your contacts. You decide whether to pick up before you answer.
+- **Offline caller ID.** The phone keeps an encrypted name pack and looks numbers up itself, so
+  names show at once and with no connection. Each entry opens only with its own number.
+- **Business names.** Shops, banks and offices that nobody has saved still get a name, from an
+  open business directory.
+- **Profile photos.** Members who add their Google photo are recognisable to the people they call.
+
+**Stop spam and scams**
+
+- **Scam warnings.** When people have reported a number, the call screen says so in plain words
+  before you answer.
+- **Spam blocking.** Block single numbers, whole number series or country codes, and send unknown
+  callers straight to silent if you like. Blocked calls never ring. Blocking is off until you
+  turn it on.
+- **Scam message checker.** Paste a message or link you're unsure about. SureCaller checks the
+  numbers and links in it against what people have reported, so you can check before you tap.
+- **Report in one tap.** The after-call card lets you report, block or suggest a name, and every
+  report protects the next person that number calls.
+
+**Look after your family**
+
+- **Family.** Invite your family and see who is protected. When a scam number calls one of you,
+  the others get an alert.
+- **SOS.** One tap sends your location to everyone in your family. SOS does not contact
+  emergency services.
+
+**A better phone app**
+
+- **Default dialer.** Dialpad, contacts, and search by name or number, with names and spam tags in
+  Recents, so one app handles your calls.
+- **Call screen.** Slide to answer, a guard against pocket touches, and Message and WhatsApp
+  shortcuts.
+- **After-call card.** Call back, save, message, open WhatsApp, or add notes and tags right after
+  the call, while you still remember who it was.
+- **Favourites, notes and tags.** Star the numbers you care about and keep private notes per number.
+- **Dual SIM.** Pick a default SIM for calls; long-press the dial button for the other one.
+- **Handymen.** A directory of local electricians, plumbers and other trades by city, with ratings
+  and reviews from other users, so you can find someone a neighbour already vouched for.
+
+**Made to fit you**
+
+- **Text size and accent colour.** Set both in Settings; the call screen and caller card follow.
+- **Accessibility.** The call screen and caller card work with TalkBack, in landscape and with
+  large text, and tap areas are at least 48dp.
+- **Cloud backup.** Block rules, notes, favourites and settings are saved sealed on the server, so
+  a reinstall or a new phone brings them back.
+- **Sign in with Google.** Sign up with a Google account or an email code, and sign back in on a
+  new phone without asking anyone.
+
+**Your data stays yours**
+
+- **Sharing is your choice.** Contact sharing is off until you turn it on, and turning it off
+  deletes what you shared.
+- **Encrypted at rest.** Shared contacts are stored encrypted. Nobody, including the server admin,
+  can list or export an address book.
+- **Fewer permissions.** No call recording and no SMS filter, so the app asks for less.
+- **Open source server.** This repository is the server, under the AGPL-3.0: you can read exactly what
+  it does with your data, or run your own.
+- **Delete any time.** Delete your account from Settings or from the website.
+
 ## What is open, and what isn't
 
 This repository is the whole server: every rule that decides a caller's name, a spam label
@@ -38,7 +107,8 @@ The official SureCaller Android app is not part of this repository. If you want 
 SureCaller, you bring the frontend: build a client against [`docs/API.md`](docs/API.md),
 host this server on your own domain, and look after it (updates, backups, security, abuse).
 Running a public caller ID service takes ongoing work, and that work is yours. If you
-just want caller ID, install the official app instead.
+just want caller ID, install the official app from
+[Google Play](https://play.google.com/store/apps/details?id=com.surecaller.app) instead.
 
 Because of the AGPL, if you run a modified version of this server for other people, you
 must share your changes with them under the same licence.
