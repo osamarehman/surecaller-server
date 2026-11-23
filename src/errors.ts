@@ -3,6 +3,8 @@ export class AppError extends Error {
     public readonly statusCode: number,
     public readonly code: string,
     message?: string,
+    /** More fields for the error body, e.g. `{ reason }`. */
+    public readonly extra?: Record<string, unknown>,
   ) {
     super(message ?? code.replace(/_/g, ' '));
   }

@@ -1,11 +1,17 @@
 import type { Client } from './db.js';
 import { conflict } from './errors.js';
+import { reportsCount } from './lookup.js';
 
 export interface UserRow {
   id: string;
   phone: string;
   name: string;
   email: string | null;
+  /** The linked Google account's id (ID token `sub`); null = not linked. Never sent to clients. */
+  google_sub: string | null;
+  google_verified_at: Date | null;
+  /** Google profile picture link (see email.ts googlePhotoUrl); null = none. */
+  photo_url: string | null;
   family_id: string;
   /** Admin of their own family. */
   is_admin: boolean;
@@ -19,8 +25,14 @@ export interface UserRow {
   fcm_token: string | null;
   device_name: string | null;
   last_seen_at: Date | null;
+  /** X-SureCaller-Build of the last request that sent one; null = never sent (builds up to 1.0.47). */
+  app_build?: number | null;
   /** The family whose name pack this member last downloaded (GET /v1/pack). */
   pack_family_id?: string | null;
+  /** Format-2 name pack: refused to this account since then (node dist/cli/pack.js revoke). */
+  pack_revoked_at?: Date | null;
+  /** The family whose format-2 family part this member was last sent. */
+  pack2_family_id?: string | null;
   shared_contact_count?: number;
 }
 
@@ -34,6 +46,7 @@ export function toUser(row: UserRow) {
     id: row.id,
     phone: row.phone,
     name: row.name,
+    photoUrl: row.photo_url ?? null,
     isAdmin: row.is_admin,
     // Deprecated: always true. Every user has the same features; old apps hid some when false.
     isTrusted: true,
@@ -54,11 +67,15 @@ export function toUser(row: UserRow) {
 /** The signed-in user's own view: adds fields other members don't see. */
 // familyId lets the app notice a family change and refetch its offline name pack.
 // isOperator: admin of the trusted family, so the app shows the server-wide Users list.
+// googleVerified: the account is linked to a Google account. reportsCount: false only when
+// SPAM_REPORTERS=google leaves this account's spam reports out (not linked, not a trusted admin).
 export const toMe = (row: UserRow) => ({
   ...toUser(row),
   email: row.email,
   familyId: row.family_id,
   isOperator: row.is_admin && row.trusted,
+  googleVerified: row.google_sub != null,
+  reportsCount: reportsCount(row),
 });
 
 export async function getUser(db: Client, id: string): Promise<UserRow | null> {

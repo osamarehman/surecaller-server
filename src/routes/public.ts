@@ -4,12 +4,22 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate, parse } from '../http.js';
 import { VERSION } from '../config.js';
-import { lockCircle, withTx } from '../db.js';
+import { lockCircle, withTx, type Client } from '../db.js';
 import { AppError, badRequest, conflict, notFound } from '../errors.js';
 import { maskPhone, requirePhone } from '../phone.js';
 import { canonicalInviteCode, hashToken, newToken, safeEqual } from '../tokens.js';
-import { Email, EmailProof, emailTaken, issueEmailCode, proveEmail, spendEmailCode } from '../email.js';
+import {
+  canonicalEmail,
+  Email,
+  EmailProof,
+  emailTaken,
+  issueEmailCode,
+  proveIdentity,
+  spendEmailCode,
+} from '../email.js';
+import { refreshSpamForUser, spamReporters } from '../lookup.js';
 import { getUser, toMe, type UserRow } from '../users.js';
+import { vault } from '../vault.js';
 
 const RegisterBody = z.object({
   // Optional only for "sign in with email": a verified email and no phone finds the account by email.
@@ -18,7 +28,8 @@ const RegisterBody = z.object({
   code: z.string().max(200).optional().default(''),
   deviceName: z.string().trim().max(100).nullish(),
   // A verified email: a Google ID token, or email + a code from POST /v1/email-codes. Required for
-  // new accounts when EMAIL_VERIFICATION=required, and signs an existing member in on a new phone.
+  // new accounts with SIGNUP_PROOF=email (a Google ID token with SIGNUP_PROOF=google), and signs an
+  // existing member in on a new phone.
   ...EmailProof,
 });
 
@@ -27,7 +38,7 @@ const EmailCodeBody = z.object({ email: Email });
 const PrivacyRequestBody = z.object({
   kind: z.enum(['account', 'remove']),
   phone: z.string().max(40),
-  email: z.string().trim().email().max(200),
+  email: z.string().trim().pipe(z.email().max(200)),
 });
 
 const phoneTaken = () =>
@@ -38,6 +49,19 @@ const phoneTaken = () =>
 
 const invalidCode = () => new AppError(403, 'invalid_code', 'Invite or admin code is not valid');
 
+const googleRequired = () =>
+  new AppError(
+    403,
+    'google_required',
+    'New accounts need a Google account. Tap “Continue with Google”, or update SureCaller from Google Play.',
+  );
+
+const googleAccountTaken = (phone: string) =>
+  conflict(
+    'email_taken',
+    `This Google account already has a SureCaller account (number ending ${phone.slice(-4)}). Sign in with Google instead.`,
+  );
+
 export async function publicRoutes(app: FastifyInstance) {
   const { cfg, pool } = app.ctx;
 
@@ -47,7 +71,9 @@ export async function publicRoutes(app: FastifyInstance) {
     } catch {
       return reply.status(503).send({ error: 'db_unavailable', message: 'Database not reachable' });
     }
-    return { ok: true, version: VERSION };
+    // signupProof only when set, so the answer stays as it was for servers that don't use it
+    // (the app reads a missing one as 'none').
+    return { ok: true, version: VERSION, ...(cfg.signupProof !== 'none' ? { signupProof: cfg.signupProof } : {}) };
   });
 
   app.post(
@@ -57,7 +83,14 @@ export async function publicRoutes(app: FastifyInstance) {
       const body = parse(RegisterBody, req.body);
       const code = body.code.trim();
       const token = newToken();
-      const email = await proveEmail(app.ctx, body);
+      const proof = await proveIdentity(app.ctx, body);
+      const email = proof?.email ?? null;
+      const sub = proof?.sub ?? null; // set only for a Google proof
+
+      // With SPAM_REPORTERS=google a newly linked account's reports start counting: relabel them.
+      const linked = async (c: Client, id: string) => {
+        if (spamReporters() === 'google') await refreshSpamForUser(c, id, cfg.spamThreshold);
+      };
 
       // Sign in with email: the verified email finds the account, whatever SIM this phone has.
       if (body.phone === undefined) {
@@ -65,15 +98,37 @@ export async function publicRoutes(app: FastifyInstance) {
         if (code) throw badRequest('invalid_request', 'Sign in with email takes no code');
         const id = await withTx(pool, async (c) => {
           await spendEmailCode(c, email);
-          const { rows } = await c.query<{ id: string }>(
-            `UPDATE users SET token_hash = $2, device_name = coalesce($3, device_name),
-               fcm_token = NULL, last_seen_at = now()
-             WHERE email = $1 RETURNING id`,
-            [email, hashToken(token), body.deviceName ?? null],
+          const noAccount = () => new AppError(404, 'no_account', 'No account uses this email; sign up instead');
+          if (!sub) {
+            // An email code: the account with that email, as before. No Google link.
+            const { rows } = await c.query<{ id: string }>(
+              `UPDATE users SET token_hash = $2, device_name = coalesce($3, device_name),
+                 fcm_token = NULL, last_seen_at = now()
+               WHERE email = $1 RETURNING id`,
+              [email, hashToken(token), body.deviceName ?? null],
+            );
+            if (!rows[0]) throw noAccount();
+            return rows[0].id;
+          }
+          // Google: the account linked to this Google account, else an unlinked one with the same
+          // address. It gets linked, and its email follows the Google account's.
+          const { rows } = await c.query<{ id: string; google_sub: string | null }>(
+            `SELECT id, google_sub FROM users
+             WHERE google_sub = $1 OR (google_sub IS NULL AND email_canonical(email) = $2)
+             ORDER BY google_sub IS NULL, email = $3 DESC, created_at
+             LIMIT 1 FOR UPDATE`,
+            [sub, canonicalEmail(email), email],
           );
-          if (!rows[0]) throw new AppError(404, 'no_account', 'No account uses this email; sign up instead');
+          if (!rows[0]) throw noAccount();
+          await c.query(
+            `UPDATE users SET token_hash = $2, device_name = coalesce($3, device_name),
+               fcm_token = NULL, last_seen_at = now(), email = $4, google_sub = $5, google_verified_at = now()
+             WHERE id = $1`,
+            [rows[0].id, hashToken(token), body.deviceName ?? null, email, sub],
+          );
+          if (rows[0].google_sub === null) await linked(c, rows[0].id);
           return rows[0].id;
-        });
+        }).catch(emailTaken);
         return reply.status(201).send({ token, user: toMe((await getUser(pool, id))!) });
       }
       const phone = requirePhone(body.phone, cfg.defaultRegion);
@@ -94,6 +149,7 @@ export async function publicRoutes(app: FastifyInstance) {
             .rows[0].id;
 
         let makeAdmin = false;
+        let bootstrap = false; // the first ADMIN_CODE sign-up, which sets up the operator's family
         let adminTakeover: { id: string; name: string } | null = null;
         let inviteCode: string | null = null;
         let familyId: string | null = null; // the family a new member joins
@@ -111,6 +167,7 @@ export async function publicRoutes(app: FastifyInstance) {
             await c.query('UPDATE families SET trusted = true WHERE id = $1', [existing.family_id]);
           } else {
             familyId = await newFamily(true);
+            bootstrap = true;
           }
           makeAdmin = true;
         } else if (code) {
@@ -133,34 +190,83 @@ export async function publicRoutes(app: FastifyInstance) {
           familyId = invite.family_id;
         } else {
           // Open sign-up: no code needed. A brand-new number starts its own family as its admin.
-          // An existing number needs its account's verified email (or an admin reset) to sign in again.
+          // An existing number needs its account's verified email (or an admin reset) to sign in again:
+          // with Google, the linked Google account, or the same address on an account not linked to
+          // another one; with an email code, the account's email.
           if (existing) {
-            if (!email || existing.email !== email) throw phoneTaken();
+            const ok = sub
+              ? existing.google_sub === sub ||
+                (existing.google_sub === null &&
+                  existing.email !== null &&
+                  canonicalEmail(existing.email) === canonicalEmail(email!))
+              : email !== null && existing.email === email;
+            if (!ok) throw phoneTaken();
           } else {
             familyId = await newFamily(false);
             makeAdmin = true;
           }
         }
-        if (!existing && cfg.emailRequired && !email) {
+        if (!existing && cfg.signupProof === 'email' && !email) {
           throw badRequest('email_required', 'Verify an email address to create an account');
         }
+        // One account per Google account. The first ADMIN_CODE sign-up (setting up the server) is
+        // exempt. An email code sent along is not spent: the transaction rolls back.
+        if (!existing && cfg.signupProof === 'google' && !bootstrap && !sub) throw googleRequired();
 
         let id: string;
         if (existing) {
+          // A Google proof links an unlinked account; one linked to another Google account keeps its link.
+          const link = sub !== null && existing.google_sub === null;
           await c.query(
             `UPDATE users SET token_hash = $2, device_name = coalesce($3, device_name),
                name = coalesce(nullif($4, ''), name), is_admin = is_admin OR $5,
-               fcm_token = NULL, last_seen_at = now(), email = coalesce($6, email)
+               fcm_token = NULL, last_seen_at = now(), email = coalesce($6, email),
+               google_sub = coalesce(google_sub, $7),
+               google_verified_at = CASE WHEN $8 THEN now() ELSE google_verified_at END
              WHERE id = $1`,
-            [existing.id, hashToken(token), body.deviceName ?? null, body.name ?? null, makeAdmin, email],
+            [
+              existing.id,
+              hashToken(token),
+              body.deviceName ?? null,
+              body.name ?? null,
+              makeAdmin,
+              email,
+              link ? sub : null,
+              sub !== null && (link || existing.google_sub === sub),
+            ],
           );
           id = existing.id;
+          if (link) await linked(c, id);
         } else {
           if (!body.name) throw badRequest('invalid_request', 'name: required');
+          if (sub) {
+            // A clear answer instead of a bare unique violation: which account this Google account has.
+            const { rows: taken } = await c.query<{ phone: string }>(
+              'SELECT phone FROM users WHERE google_sub = $1 OR email_canonical(email) = $2 LIMIT 1',
+              [sub, canonicalEmail(email!)],
+            );
+            if (taken[0]) throw googleAccountTaken(taken[0].phone);
+          }
           const { rows } = await c.query<{ id: string }>(
-            `INSERT INTO users (phone, name, is_admin, family_id, device_name, token_hash, last_seen_at, email)
-             VALUES ($1, $2, $3, $4, $5, $6, now(), $7) RETURNING id`,
-            [phone, body.name, makeAdmin, familyId, body.deviceName ?? null, hashToken(token), email],
+            // A new account made with Google starts with its Google picture. Signing in again never
+            // changes the photo: the member may have removed it (PUT / DELETE /v1/me/photo).
+            // phone_hash lets the name pack triggers queue the new member's number.
+            `INSERT INTO users (phone, name, is_admin, family_id, device_name, token_hash, last_seen_at, email, photo_url,
+               google_sub, google_verified_at, phone_hash)
+             VALUES ($1, $2, $3, $4, $5, $6, now(), $7, $8, $9::text, CASE WHEN $9::text IS NULL THEN NULL ELSE now() END, $10)
+             RETURNING id`,
+            [
+              phone,
+              body.name,
+              makeAdmin,
+              familyId,
+              body.deviceName ?? null,
+              hashToken(token),
+              email,
+              proof?.picture ?? null,
+              sub,
+              vault().index(phone),
+            ],
           );
           id = rows[0].id;
         }

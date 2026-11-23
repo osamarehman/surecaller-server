@@ -11,14 +11,17 @@ import { authenticate } from './http.js';
 import { createGoogleVerifier, type GoogleVerifier } from './email.js';
 import { createMailer, type Mailer } from './mail.js';
 import { initVault } from './vault.js';
-import { initPack } from './pack.js';
+import { initAppKeys, initPack } from './pack.js';
+import { setSpamReporters } from './lookup.js';
 import type { UserRow } from './users.js';
+import { legacyUsage, LookupBudget } from './usage.js';
 import { publicRoutes } from './routes/public.js';
 import { meRoutes } from './routes/me.js';
 import { circleRoutes } from './routes/circle.js';
 import { lookupRoutes } from './routes/lookup.js';
 import { syncRoutes } from './routes/sync.js';
 import { packRoutes } from './routes/pack.js';
+import { pack2Routes } from './routes/pack2.js';
 import { eventRoutes } from './routes/events.js';
 import { checkRoutes } from './routes/check.js';
 import { telemetryAdminRoutes, telemetryIngestRoutes } from './routes/telemetry.js';
@@ -52,6 +55,8 @@ export async function buildApp(
 
   initVault(cfg.contactsKey);
   initPack(cfg.packKey);
+  initAppKeys(cfg.packAppKeys);
+  setSpamReporters(cfg.spamReporters);
   app.decorate('ctx', {
     cfg,
     pool,
@@ -62,7 +67,10 @@ export async function buildApp(
       }),
     mailer: mailer ?? createMailer(cfg.smtpUrl, cfg.mailFrom, app.log),
     google: google ?? createGoogleVerifier(cfg.googleClientIds),
+    budget: new LookupBudget(pool, cfg.lookupDailyLimit, cfg.lookupDailyEnforce, app.log),
   });
+  const legacy = legacyUsage(pool, app.log);
+  app.addHook('onClose', () => legacy.close());
   app.decorateRequest('user', null as unknown as UserRow);
 
   // Accept empty JSON bodies (e.g. DELETE with Content-Type set).
@@ -79,7 +87,7 @@ export async function buildApp(
 
   app.setErrorHandler((err: unknown, req, reply) => {
     if (err instanceof AppError) {
-      return reply.status(err.statusCode).send({ error: err.code, message: err.message });
+      return reply.status(err.statusCode).send({ error: err.code, message: err.message, ...err.extra });
     }
     const e = err as { code?: string; statusCode?: number; message?: string };
     if (e.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
@@ -97,6 +105,22 @@ export async function buildApp(
     req.log.error({ err }, 'unhandled error');
     return reply.status(500).send({ error: 'internal_error', message: 'Something went wrong' });
   });
+
+  // LOG_LEVEL=debug: log the client address each request is rate-limited by, next to the
+  // forwarding headers it came from (no URL: lookup paths carry phone numbers). To check TRUST_PROXY.
+  if (cfg.logLevel === 'debug' || cfg.logLevel === 'trace') {
+    app.addHook('onRequest', async (req) => {
+      req.log.debug(
+        {
+          ip: req.ip,
+          socket: req.socket.remoteAddress,
+          xff: req.headers['x-forwarded-for'] ?? null,
+          cfConnectingIp: req.headers['cf-connecting-ip'] ?? null,
+        },
+        'client address',
+      );
+    });
+  }
 
   app.setNotFoundHandler((_req, reply) => {
     reply.status(404).send({ error: 'not_found', message: 'Not found' });
@@ -164,11 +188,13 @@ export async function buildApp(
   await app.register(feedbackPublicRoutes);
   await app.register(async (v1) => {
     v1.addHook('onRequest', authenticate);
+    v1.addHook('onRequest', legacy.record);
     await v1.register(meRoutes);
     await v1.register(circleRoutes);
     await v1.register(lookupRoutes);
     await v1.register(syncRoutes);
     await v1.register(packRoutes);
+    await v1.register(pack2Routes);
     await v1.register(eventRoutes);
     await v1.register(checkRoutes);
     await v1.register(telemetryAdminRoutes);

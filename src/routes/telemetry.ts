@@ -43,7 +43,7 @@ const TelemetryBody = z.object({
         source: z.enum(['dart', 'native']),
         tag: z.string().nullish(),
         message: z.string().nullish(),
-        details: z.record(z.unknown()).nullish(),
+        details: z.record(z.string(), z.unknown()).nullish(),
       }),
     )
     .min(1)
@@ -52,7 +52,7 @@ const TelemetryBody = z.object({
 
 const ListQuery = z.object({
   installId: z.string().trim().min(1).max(100).optional(),
-  userId: z.string().uuid().optional(),
+  userId: z.guid().optional(),
   level: z.enum(LEVELS).optional(),
   tag: z.string().trim().min(1).max(MAX_TAG).optional(),
   since: z.string().optional(),

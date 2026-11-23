@@ -47,6 +47,8 @@ export async function adminRoutes(app: FastifyInstance) {
     ).rows[0];
     if (!user) throw notFound('User not found');
 
+    // The lookup log is pruned after 2 days (server.ts), so the lookup counts and the 14-day
+    // chart only ever cover the last 2 days (docs/API.md says so).
     const [counts, daily, devices] = await Promise.all([
       pool.query(
         `SELECT

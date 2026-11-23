@@ -26,22 +26,29 @@ const NameBody = z.object({
   name: z.string().trim().min(1).max(60),
 });
 
+/** Answers that carry a caller-ID name: what the daily budget counts (src/usage.ts). */
+export const named = (ls: { name: string | null }[]) => ls.filter((l) => l.name !== null).length;
+
 export async function lookupRoutes(app: FastifyInstance) {
-  const { cfg, pool } = app.ctx;
+  const { cfg, pool, budget } = app.ctx;
   const threshold = cfg.spamThreshold;
 
   app.get<{ Params: { phone: string } }>(
     '/lookup/:phone',
     { config: { rateLimit: { max: cfg.lookupRateLimit, timeWindow: '1 minute', keyGenerator: userKey } } },
-    async (req) => {
+    async (req, reply) => {
       const phone = requirePhone(req.params.phone, cfg.defaultRegion);
+      // Refused before the lookup is logged, so a refused call doesn't count toward callsToday.
+      await budget.check(req, reply);
       // Every lookup counts toward callsToday and the spam score (never the label); the per-user
       // rate limit above caps how far one account can push it.
-      return buildLookup(pool, phone, {
+      const l = await buildLookup(pool, phone, {
         threshold,
         logUserId: req.user.id,
         familyId: req.user.family_id,
       });
+      await budget.charge(req, reply, named([l]));
+      return l;
     },
   );
 
@@ -60,14 +67,22 @@ export async function lookupRoutes(app: FastifyInstance) {
       reply.header('retry-after', String(Math.ceil(waitMs / 1000)));
       throw tooManyRequests(waitMs);
     }
+    await budget.check(req, reply);
     // A fixed handful of set-based queries, run in parallel.
-    return { results: await buildLookups(pool, phones, threshold, undefined, req.user.family_id) };
+    const results = await buildLookups(pool, phones, threshold, undefined, req.user.family_id);
+    // A batch that would cross the daily limit is refused whole (429): old apps keep their cache.
+    await budget.charge(req, reply, named(results));
+    return { results };
   });
 
   // Every user feeds the shared spam list; the per-user limits stop one account flooding it.
-  app.post('/reports', { config: { rateLimit: { max: 60, timeWindow: '1 hour', keyGenerator: userKey } } }, async (req) => {
+  // ?view=spam answers { spam } only, outside the daily name budget.
+  app.post<{ Querystring: { view?: string } }>('/reports', { config: { rateLimit: { max: 60, timeWindow: '1 hour', keyGenerator: userKey } } }, async (req, reply) => {
     const b = parse(ReportBody, req.body);
     const phone = requirePhone(b.phone, cfg.defaultRegion);
+    const spamOnly = req.query.view === 'spam';
+    // Refused before the report is stored: a 429 means nothing happened.
+    if (!spamOnly) await budget.check(req, reply);
     const spamRaw = await withTx(pool, async (c) => {
       await c.query(
         `INSERT INTO reports (user_id, phone, category, comment, not_spam, created_at)
@@ -78,7 +93,10 @@ export async function lookupRoutes(app: FastifyInstance) {
       );
       return refreshSpamState(c, [phone], threshold);
     });
-    return buildLookup(pool, phone, { threshold, spamRaw, familyId: req.user.family_id });
+    const l = await buildLookup(pool, phone, { threshold, spamRaw, familyId: req.user.family_id });
+    if (spamOnly) return { spam: l.spam };
+    await budget.charge(req, reply, named([l]), false);
+    return l;
   });
 
   app.delete<{ Params: { phone: string } }>('/reports/:phone', async (req, reply) => {
@@ -90,9 +108,12 @@ export async function lookupRoutes(app: FastifyInstance) {
     return reply.status(204).send();
   });
 
-  app.post('/names', { config: { rateLimit: { max: 60, timeWindow: '1 hour', keyGenerator: userKey } } }, async (req) => {
+  // ?view=none answers 204 with no Lookup, outside the daily name budget.
+  app.post<{ Querystring: { view?: string } }>('/names', { config: { rateLimit: { max: 60, timeWindow: '1 hour', keyGenerator: userKey } } }, async (req, reply) => {
     const b = parse(NameBody, req.body);
     const phone = requirePhone(b.phone, cfg.defaultRegion);
+    const none = req.query.view === 'none';
+    if (!none) await budget.check(req, reply);
     await pool.query(
       `INSERT INTO name_suggestions (user_id, phone_hash, name_enc, phone_enc)
        SELECT $1, $2, $3, $4 WHERE NOT EXISTS (SELECT 1 FROM opt_outs WHERE phone_hash = $2)
@@ -100,6 +121,9 @@ export async function lookupRoutes(app: FastifyInstance) {
          phone_enc = coalesce(EXCLUDED.phone_enc, name_suggestions.phone_enc), created_at = now()`,
       [req.user.id, vault().index(phone), vault().seal(phone, b.name), sealPhoneOrNull(phone)],
     );
-    return buildLookup(pool, phone, { threshold, familyId: req.user.family_id });
+    if (none) return reply.status(204).send();
+    const l = await buildLookup(pool, phone, { threshold, familyId: req.user.family_id });
+    await budget.charge(req, reply, named([l]), false);
+    return l;
   });
 }

@@ -6,11 +6,16 @@ import pg from 'pg';
 import { inject } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { loadConfig, type Config } from '../src/config.js';
+import { createPool } from '../src/db.js';
 import type { Notifier } from '../src/fcm.js';
 import type { Mailer } from '../src/mail.js';
 import { migrate } from '../src/migrate.js';
 
 export const ADMIN_CODE = 'test-admin-code';
+
+/** The profile picture the fake Google (see createHarness) gives an account. */
+export const fakePhoto = (email: string) =>
+  `https://lh3.googleusercontent.com/a/${encodeURIComponent(email.toLowerCase())}=s256-c`;
 
 export interface Harness {
   app: FastifyInstance;
@@ -37,11 +42,12 @@ export async function createHarness(overrides: Partial<Config> = {}): Promise<Ha
     logLevel: 'silent',
     ...overrides,
   });
-  const pool = new pg.Pool({ connectionString: cfg.databaseUrl, max: 10 });
+  // The server's pool settings (statement_timeout included), with fewer connections.
+  const pool = createPool(cfg.databaseUrl, { max: 10, statementTimeoutMs: cfg.dbStatementTimeoutMs });
   await migrate(pool);
   await pool.query(`TRUNCATE families, users, invites, contacts, reports, name_suggestions, lookups,
-    spam_state, blocks, events, url_reports, telemetry, email_codes, feedback, directory, opt_outs,
-    pack_meta, pack_entries, pack_phone_keys RESTART IDENTITY CASCADE`);
+    spam_state, blocks, events, url_reports, telemetry, email_codes, email_code_limits, feedback, directory,
+    opt_outs, pack_meta, pack_entries, pack_phone_keys, pack_dirty RESTART IDENTITY CASCADE`);
   const sent: Harness['sent'] = [];
   const notifier: Notifier = {
     enabled: true,
@@ -56,8 +62,16 @@ export async function createHarness(overrides: Partial<Config> = {}): Promise<Ha
       mails.push({ to, subject, text });
     },
   };
-  // Fake Google: a token "google:<email>" proves that email, anything else fails.
-  const google = async (t: string) => (t.startsWith('google:') ? t.slice(7).toLowerCase() : null);
+  // Fake Google: a token "google:<email>" proves that email, with the Google account id (sub)
+  // "sub:<email>"; "google:<email>#<sub>" sets the sub. Anything else fails, and "unreachable"
+  // throws like Google being down. The account's picture is fakePhoto(email); "nopic@..." has none.
+  const google = async (t: string) => {
+    if (t === 'unreachable') throw new Error('connect ETIMEDOUT');
+    if (!t.startsWith('google:')) return null;
+    const [raw, sub] = t.slice(7).split('#');
+    const email = raw.toLowerCase();
+    return { email, picture: email.startsWith('nopic@') ? null : fakePhoto(email), sub: sub || `sub:${email}` };
+  };
   const app = await buildApp(cfg, pool, notifier, mailer, google);
   await app.ready();
   return {

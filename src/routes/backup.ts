@@ -6,7 +6,7 @@ import { vault } from '../vault.js';
 
 // The app's local data (docs/API.md -> Backup). Opaque to the server: stored sealed, returned as sent.
 const MAX_BYTES = 1_048_576;
-const Body = z.object({ data: z.record(z.unknown()) });
+const Body = z.object({ data: z.record(z.string(), z.unknown()) });
 // ponytail: reuses the vault's per-"phone" key with a prefix, so no new key to manage
 const keyFor = (userId: string) => `backup:${userId}`;
 

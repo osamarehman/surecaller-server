@@ -1,4 +1,5 @@
-import type { Client, Pool } from './db.js';
+import type { SpamReporters } from './config.js';
+import { withTx, type Client, type Pool } from './db.js';
 import { cleanName, romanize } from './names.js';
 import { vault } from './vault.js';
 
@@ -22,6 +23,11 @@ export interface Lookup {
   altNames: { name: string; count: number }[];
   savedByCount: number;
   member: { id: string; name: string; status: string | null } | null;
+  /**
+   * The Google profile picture of the SureCaller account on this number, from any family, when
+   * its owner has one. Null otherwise.
+   */
+  photoUrl: string | null;
   spam: SpamInfo;
   blocked: { byCircle: true; addedBy: string | null } | null;
   callsToday: number;
@@ -47,9 +53,29 @@ export interface RawSpam {
   lastComment: string | null;
 }
 
+let reporters: SpamReporters = 'all';
+
+/** SPAM_REPORTERS for this process; set once from the config (buildApp). */
+export function setSpamReporters(r: SpamReporters): void {
+  reporters = r;
+}
+
+export const spamReporters = (): SpamReporters => reporters;
+
+/**
+ * Whether this account's reports count with the current SPAM_REPORTERS: with 'google', only
+ * Google-linked accounts and the trusted family's admins count. Mirrors the filter in rawSpam.
+ */
+export const reportsCount = (u: { google_sub?: string | null; is_admin: boolean; trusted: boolean }): boolean =>
+  reporters === 'all' || u.google_sub != null || (u.is_admin && u.trusted);
+
 const NO_REPORTS: RawSpam = { reports: 0, notSpam: 0, adminReported: false, topCategory: null, lastComment: null };
 
-/** Report aggregates for many phones in one query. Phones without reports are absent. */
+/**
+ * Report aggregates for many phones in one query. Phones without reports are absent. With
+ * SPAM_REPORTERS=google only reports (and not-spam votes, categories, comments) from Google-linked
+ * accounts and the trusted family's admins count; the others stay stored but are left out here.
+ */
 async function rawSpam(db: Client, phones: string[]): Promise<Map<string, RawSpam>> {
   const { rows } = await db.query<{
     phone: string;
@@ -59,29 +85,33 @@ async function rawSpam(db: Client, phones: string[]): Promise<Map<string, RawSpa
     top_category: string | null;
     last_comment: string | null;
   }>(
-    `WITH agg AS (
+    `WITH r AS (
+       SELECT r.*, u.is_admin AND f.trusted AS trusted_admin
+       FROM reports r JOIN users u ON u.id = r.user_id JOIN families f ON f.id = u.family_id
+       WHERE r.phone = ANY($1::text[])
+         AND ($2 = 'all' OR u.google_sub IS NOT NULL OR (u.is_admin AND f.trusted))
+     ), agg AS (
        SELECT r.phone,
          count(*) FILTER (WHERE NOT r.not_spam) AS reports,
          count(*) FILTER (WHERE r.not_spam) AS not_spam,
          -- Only the trusted family's admins can label a number alone; anyone else's own family doesn't count.
-         coalesce(bool_or(u.is_admin AND f.trusted AND NOT r.not_spam), false) AS admin_reported
-       FROM reports r JOIN users u ON u.id = r.user_id JOIN families f ON f.id = u.family_id
-       WHERE r.phone = ANY($1::text[])
+         coalesce(bool_or(r.trusted_admin AND NOT r.not_spam), false) AS admin_reported
+       FROM r
        GROUP BY r.phone
      ), top AS (
        SELECT DISTINCT ON (phone) phone, category
-       FROM (SELECT phone, category, count(*) AS n, max(created_at) AS latest FROM reports
-             WHERE phone = ANY($1::text[]) AND NOT not_spam AND category IS NOT NULL
+       FROM (SELECT phone, category, count(*) AS n, max(created_at) AS latest FROM r
+             WHERE NOT not_spam AND category IS NOT NULL
              GROUP BY phone, category) t
        ORDER BY phone, n DESC, latest DESC
      ), lc AS (
-       SELECT DISTINCT ON (phone) phone, comment FROM reports
-       WHERE phone = ANY($1::text[]) AND NOT not_spam AND coalesce(comment, '') <> ''
+       SELECT DISTINCT ON (phone) phone, comment FROM r
+       WHERE NOT not_spam AND coalesce(comment, '') <> ''
        ORDER BY phone, created_at DESC
      )
      SELECT agg.*, top.category AS top_category, lc.comment AS last_comment
      FROM agg LEFT JOIN top USING (phone) LEFT JOIN lc USING (phone)`,
-    [phones],
+    [phones, reporters],
   );
   return new Map(
     rows.map((r) => [
@@ -210,7 +240,44 @@ export async function refreshSpamState(
       spam.map((x) => x.topCategory),
     ],
   );
+  await writeSpamDetails(db, phones, raw, calls);
   return raw;
+}
+
+/**
+ * The spam_state details /v1/sync?v=2 carries for lookups on the phone: not-spam votes, the last
+ * comment and calls (lookups in the last 24 h), on rows spam_state already has. Bumps
+ * detail_updated_at, never updated_at, and only when one changed, so callers without ?v=2 get
+ * the same answer as before. Returns the rows changed.
+ */
+async function writeSpamDetails(db: Client, phones: string[], raw: Map<string, RawSpam>, calls: Map<string, number>) {
+  const { rowCount } = await db.query(
+    `UPDATE spam_state s SET not_spam = t.ns, last_comment = t.lc, calls = t.c, detail_updated_at = now()
+     FROM unnest($1::text[], $2::int[], $3::text[], $4::int[]) AS t(phone, ns, lc, c)
+     WHERE s.phone = t.phone AND (s.not_spam, s.last_comment, s.calls) IS DISTINCT FROM (t.ns, t.lc, t.c)`,
+    [
+      phones,
+      phones.map((p) => raw.get(p)?.notSpam ?? 0),
+      phones.map((p) => raw.get(p)?.lastComment ?? null),
+      phones.map((p) => calls.get(p) ?? 0),
+    ],
+  );
+  return rowCount ?? 0;
+}
+
+/**
+ * Refreshes the /v1/sync?v=2 details (writeSpamDetails) of every labelled number, in batches:
+ * hourly from the API (calls change with every lookup) and once at start, which also fills them
+ * in for rows from before 022_pack_v2.sql. Returns the rows changed.
+ */
+export async function refreshSpamDetails(pool: Pool): Promise<number> {
+  const { rows } = await pool.query<{ phone: string }>("SELECT phone FROM spam_state WHERE label <> 'none' ORDER BY phone");
+  let changed = 0;
+  for (let i = 0; i < rows.length; i += RECOMPUTE_BATCH) {
+    const phones = rows.slice(i, i + RECOMPUTE_BATCH).map((r) => r.phone);
+    changed += await writeSpamDetails(pool, phones, await rawSpam(pool, phones), await callCounts(pool, phones));
+  }
+  return changed;
 }
 
 async function reportedPhones(db: Client, userId: string): Promise<string[]> {
@@ -236,6 +303,41 @@ export async function refreshSpamForUser(
   await refreshSpamState(db, phones, threshold);
 }
 
+const SPAM_RULES_KEY = 'spam_reporters';
+const RECOMPUTE_BATCH = 500;
+
+/**
+ * On start: when SPAM_REPORTERS differs from the rule spam_state was last computed with
+ * (server_state, 'all' when never stored), recomputes spam_state for every reported or labelled
+ * number in batches, so /v1/sync delivers the new labels, then stores the rule. Returns how many
+ * numbers it recomputed, or null when the rule had not changed.
+ */
+export async function syncSpamRules(pool: Pool, threshold: number): Promise<number | null> {
+  const { rows } = await pool.query<{ value: string }>('SELECT value FROM server_state WHERE key = $1', [
+    SPAM_RULES_KEY,
+  ]);
+  if ((rows[0]?.value ?? 'all') === reporters) {
+    if (!rows[0]) await storeSpamRules(pool);
+    return null;
+  }
+  const { rows: phones } = await pool.query<{ phone: string }>(
+    `SELECT phone FROM reports UNION SELECT phone FROM spam_state WHERE label <> 'none' ORDER BY phone`,
+  );
+  for (let i = 0; i < phones.length; i += RECOMPUTE_BATCH) {
+    const batch = phones.slice(i, i + RECOMPUTE_BATCH).map((r) => r.phone);
+    await withTx(pool, (c) => refreshSpamState(c, batch, threshold));
+  }
+  await storeSpamRules(pool);
+  return phones.length;
+}
+
+const storeSpamRules = (pool: Pool) =>
+  pool.query(
+    `INSERT INTO server_state (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    [SPAM_RULES_KEY, reporters],
+  );
+
 export interface NameCount {
   name: string;
   count: number;
@@ -258,8 +360,13 @@ export async function buildLookups(
   const phones = [...new Set(phoneList)];
   if (phones.length === 0) return [];
   const index = indexPhones(phones);
-  const [callsBy, memberRes, contactRes, dirRes, suggestRes, blockRes, spamBy] = await Promise.all([
+  const [callsBy, photoRes, memberRes, contactRes, dirRes, suggestRes, blockRes, spamBy] = await Promise.all([
     callCounts(pool, phones),
+    // A member's photo shows to every user they call, not only their family: they chose to have one.
+    pool.query<{ phone: string; photo_url: string }>(
+      'SELECT phone, photo_url FROM users WHERE phone = ANY($1::text[]) AND photo_url IS NOT NULL',
+      [phones],
+    ),
     pool.query<{ phone: string; id: string; name: string; status: string | null }>(
       // Only your own family members are badged as "member"; other families stay invisible.
       'SELECT phone, id, name, status FROM users WHERE family_id = $2 AND phone = ANY($1::text[])',
@@ -293,6 +400,7 @@ export async function buildLookups(
     spamRaw ?? rawSpam(pool, phones),
   ]);
   const memberBy = new Map(memberRes.rows.map((r) => [r.phone, r]));
+  const photoBy = new Map(photoRes.rows.map((r) => [r.phone, r.photo_url]));
   const contactsBy = rankNames(contactRes.rows, index.phoneOf);
   const suggestBy = rankNames(suggestRes.rows, index.phoneOf);
   const dirBy = new Map(
@@ -338,6 +446,7 @@ export async function buildLookups(
       altNames: [],
       savedByCount: contacts.reduce((s, c) => s + c.count, 0),
       member: member ? { id: member.id, name: member.name, status: member.status } : null,
+      photoUrl: photoBy.get(phone) ?? null,
       spam: toSpamInfo(spamBy.get(phone) ?? NO_REPORTS, threshold, calls),
       blocked: block ? { byCircle: true, addedBy: block.added_by } : null,
       callsToday: calls,

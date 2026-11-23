@@ -35,7 +35,9 @@ export const tidy = (s: string) => {
   return CANON.get(t.toLowerCase()) ?? t;
 };
 
-const label = z.string().trim().min(2).max(40).transform(tidy);
+// abort: a bad label inside the category array fails the whole union ("category: Invalid input")
+// as it did in zod 3, rather than zod 4 reporting the array element.
+const label = z.string().trim().min(2, { abort: true }).max(40, { abort: true }).transform(tidy);
 
 // Suggested cities keep their spelling; any other place name is title-cased like a category.
 const CITIES = new Map(

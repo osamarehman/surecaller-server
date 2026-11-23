@@ -6,7 +6,9 @@
  *   docker compose exec api node dist/cli/privacy.js reject <id>
  *
  * apply, kind "account": deletes that member (same as Delete account in the app).
- * apply, kind "remove":  adds the number to opt_outs and deletes every shared and directory name for it.
+ * apply, kind "remove":  adds the number to opt_outs and deletes every shared and directory name and
+ *                        handyman listing for it; with PACK_KEY, waits (up to 60 s) for the name to
+ *                        leave the offline name pack and says so.
  * Either way the request row is deleted afterwards, so the phone and email don't linger.
  */
 import { loadConfig } from '../config.js';
@@ -48,13 +50,14 @@ async function main() {
   } else if (cmd === 'apply') {
     const x = await optOutNumber(pool, r.phone);
     console.log(
-      `Opted out ${r.phone}: removed ${x.contacts} shared contacts, ${x.suggestions} name suggestions and ${x.directory} directory entries.`,
+      `Opted out ${r.phone}: removed ${x.contacts} shared contacts, ${x.suggestions} name suggestions, ${x.directory} directory entries and ${x.handymen} handyman listings.`,
     );
-    if (cfg.packKey) {
+    if (x.pack) {
       console.log(
-        x.pack
-          ? `Name pack updated: ${x.pack.deleted} entries deleted.`
-          : 'Name pack: a rebuild is already running; the next one (within 15 minutes) removes the name.',
+        x.pack.done
+          ? `Name pack updated in ${(x.pack.doneMs / 1000).toFixed(1)} s: ${x.pack.deleted} entries deleted.`
+          : `Name pack: the removal is queued but did not finish within ${Math.round(x.pack.doneMs / 1000)} s; ` +
+              'the pack worker removes the name on its next drain (check it runs: docker compose logs pack-worker).',
       );
     }
   }

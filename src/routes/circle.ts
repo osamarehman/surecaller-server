@@ -6,7 +6,7 @@ import { parse, requireAdmin, userKey } from '../http.js';
 import { refreshSpamForUser } from '../lookup.js';
 import { normalizePhone, requirePhone } from '../phone.js';
 import { vault } from '../vault.js';
-import { requestPackRebuild, sealPhoneOrNull } from '../pack.js';
+import { sealPhoneOrNull } from '../pack.js';
 import { canonicalInviteCode, newInviteCode } from '../tokens.js';
 import { assertKeepsAnAdmin, getUser, toMe, toUser, USER_SELECT, UUID_RE, type UserRow } from '../users.js';
 import { deleteMember } from './me.js';
@@ -41,6 +41,13 @@ const InviteBody = z.object({
   // Binds the code to this phone; required to re-register an existing member.
   phone: z.string().nullish(),
 });
+
+/** POST /v1/invites per member per hour (an admin inviting a family or resetting devices needs a handful). */
+export const INVITE_RATE_LIMIT = 30;
+/** GET /v1/stats per member per minute (the app calls it when the Circle screen opens or refreshes). */
+export const STATS_RATE_LIMIT = 60;
+/** How long the shared knownNumbers count is reused before it is counted again. */
+const STATS_KNOWN_TTL_MS = 5 * 60_000;
 
 const MAX_CONTACTS = 20_000;
 const ContactsBody = z.object({
@@ -138,7 +145,7 @@ export async function circleRoutes(app: FastifyInstance) {
   // Non-admins may send up to this many plain invites (outstanding + already used).
   const MEMBER_INVITE_LIMIT = 5;
 
-  app.post('/invites', async (req, reply) => {
+  app.post('/invites', { config: { rateLimit: { max: INVITE_RATE_LIMIT, timeWindow: '1 hour', keyGenerator: userKey } } }, async (req, reply) => {
     const b = parse(InviteBody, req.body);
     const phone = b.phone ? requirePhone(b.phone, cfg.defaultRegion) : null;
     // Phone-bound (device-reset) codes are admin-only.
@@ -178,19 +185,41 @@ export async function circleRoutes(app: FastifyInstance) {
     return reply.status(201).send(result);
   });
 
+  // knownNumbers walks the whole caller-ID dataset, so it is counted at most once per
+  // STATS_KNOWN_TTL_MS for everyone (in memory, per API process).
+  let known: { value: number; at: number; pending: Promise<number> | null } = { value: 0, at: 0, pending: null };
+  const knownNumbers = async (): Promise<number> => {
+    if (Date.now() - known.at < STATS_KNOWN_TTL_MS) return known.value;
+    known.pending ??= (async () => {
+      try {
+        const userPhones = (await pool.query<{ phone: string }>('SELECT phone FROM users')).rows;
+        const { rows } = await pool.query<{ known: number }>(
+          `SELECT count(*) AS known FROM (SELECT phone_hash FROM contacts UNION SELECT phone_hash FROM name_suggestions
+             UNION SELECT phone_hash FROM directory UNION SELECT unnest($1::bytea[])) k`,
+          [userPhones.map((u) => vault().index(u.phone))],
+        );
+        known = { value: rows[0].known, at: Date.now(), pending: null };
+        return rows[0].known;
+      } finally {
+        known.pending = null;
+      }
+    })();
+    return known.pending;
+  };
+
   // members and blocked are this family's; knownNumbers is the shared caller-ID database.
-  app.get('/stats', async (req) => {
-    const userPhones = (await pool.query<{ phone: string }>('SELECT phone FROM users')).rows;
-    const { rows } = await pool.query<{ members: number; known: number; blocked: number }>(
-      `SELECT
-         (SELECT count(*) FROM users WHERE family_id = $2) AS members,
-         (SELECT count(*) FROM (SELECT phone_hash FROM contacts UNION SELECT phone_hash FROM name_suggestions
-                                UNION SELECT phone_hash FROM directory UNION SELECT unnest($1::bytea[])) k) AS known,
-         (SELECT count(*) FROM events e JOIN users u ON u.id = e.from_user
-          WHERE e.type = 'spam_call' AND u.family_id = $2) AS blocked`,
-      [userPhones.map((u) => vault().index(u.phone)), req.user.family_id],
-    );
-    return { members: rows[0].members, knownNumbers: rows[0].known, spamBlocked: rows[0].blocked };
+  app.get('/stats', { config: { rateLimit: { max: STATS_RATE_LIMIT, timeWindow: '1 minute', keyGenerator: userKey } } }, async (req) => {
+    const [{ rows }, knownCount] = await Promise.all([
+      pool.query<{ members: number; blocked: number }>(
+        `SELECT
+           (SELECT count(*) FROM users WHERE family_id = $1) AS members,
+           (SELECT count(*) FROM events e JOIN users u ON u.id = e.from_user
+            WHERE e.type = 'spam_call' AND u.family_id = $1) AS blocked`,
+        [req.user.family_id],
+      ),
+      knownNumbers(),
+    ]);
+    return { members: rows[0].members, knownNumbers: knownCount, spamBlocked: rows[0].blocked };
   });
 
   app.post('/contacts/sync', { config: { rateLimit: { max: 30, timeWindow: '1 hour', keyGenerator: userKey } } }, async (req) => {
@@ -233,7 +262,7 @@ export async function circleRoutes(app: FastifyInstance) {
         );
       }
     });
-    if (phoneEnc.some(Boolean)) requestPackRebuild(); // pack entries now, not at the next 15-min run
+    // The contacts triggers queue these numbers; the pack worker rebuilds them (pack-runner.ts).
     return { stored: phones.length };
   });
 

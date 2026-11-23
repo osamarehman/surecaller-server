@@ -12,7 +12,6 @@ import { createPool } from '../db.js';
 import { importDirectory, type DirectoryEntry } from '../directory.js';
 import { initVault } from '../vault.js';
 import { initPack } from '../pack.js';
-import { reconcilePack } from '../pack-build.js';
 
 if (process.argv[2] !== 'import') {
   console.error('Usage: directory.js import < file.ndjson');
@@ -31,12 +30,10 @@ async function main() {
   const n = await importDirectory(pool, entries, cfg.defaultRegion);
   console.log(`Read ${entries.length} entries; the directory now has ${n} numbers.`);
   if (cfg.packKey) {
-    console.log('Updating the offline name pack (new numbers need an Argon2 hash each; this can take a while)...');
-    const r = await reconcilePack(pool);
+    // The import's TRUNCATE set pack_meta.full_requested_at: the pack worker runs a full pass.
     console.log(
-      r
-        ? `Name pack: ${r.entries} entries, ${r.upserted} updated, ${r.deleted} deleted, ${r.hashed} hashed in ${r.ms} ms.`
-        : 'Name pack: another rebuild is running; it picks up the new directory on its next pass.',
+      'Name pack: the pack worker rebuilds it now (a full pass; new numbers need an Argon2 hash each, so this ' +
+        'can take a while). Follow it with: docker compose logs -f pack-worker',
     );
   }
 }

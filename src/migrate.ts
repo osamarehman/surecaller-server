@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type pg from 'pg';
 import { ROOT_DIR } from './config.js';
+import { noStatementTimeout } from './db.js';
 import { vault } from './vault.js';
 
 const MIGRATIONS_DIR = path.join(ROOT_DIR, 'migrations');
@@ -10,6 +11,15 @@ const LOCK_ID = 727272;
 /** Applies every migrations/*.sql file not yet recorded, in file-name order. */
 export async function migrate(pool: pg.Pool, log: (msg: string) => void = () => {}): Promise<void> {
   const client = await pool.connect();
+  try {
+    // A migration (or the wait for another starter's lock) may outlast the pool's statement_timeout.
+    await noStatementTimeout(client, () => migrateOn(client, log));
+  } finally {
+    client.release();
+  }
+}
+
+async function migrateOn(client: pg.PoolClient, log: (msg: string) => void): Promise<void> {
   try {
     // Serialize concurrent starters.
     await client.query('SELECT pg_advisory_lock($1)', [LOCK_ID]);
@@ -35,7 +45,6 @@ export async function migrate(pool: pg.Pool, log: (msg: string) => void = () => 
     await encryptPlainTables(client, log);
   } finally {
     await client.query('SELECT pg_advisory_unlock($1)', [LOCK_ID]).catch(() => {});
-    client.release();
   }
 }
 

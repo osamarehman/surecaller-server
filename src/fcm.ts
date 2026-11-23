@@ -12,6 +12,9 @@ interface Logger {
   warn(obj: unknown, msg?: string): void;
 }
 
+/** Per request to Google (token fetch, each send). */
+const FCM_TIMEOUT_MS = 10_000;
+
 export const nullNotifier: Notifier = { enabled: false, send: async () => {} };
 
 /**
@@ -35,6 +38,8 @@ export function createNotifier(
   const auth = new GoogleAuth({
     keyFile: serviceAccountPath,
     scopes: ['https://www.googleapis.com/auth/firebase.messaging'],
+    // The access-token fetch, so a stalled Google endpoint can't hang a send.
+    clientOptions: { transporterOptions: { timeout: FCM_TIMEOUT_MS } },
   });
   const url = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
   log.info(`FCM enabled for project ${projectId}`);
@@ -56,6 +61,7 @@ export function createNotifier(
             await client.request({
               url,
               method: 'POST',
+              timeout: FCM_TIMEOUT_MS,
               data: { message: { token, data, android: { priority: 'HIGH' } } },
             });
           } catch (err) {

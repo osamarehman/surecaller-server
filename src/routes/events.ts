@@ -1,7 +1,13 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { parse, parseSince } from '../http.js';
+import { parse, parseSince, userKey } from '../http.js';
 import { requirePhone } from '../phone.js';
+
+/**
+ * spam_call / scam_sms events per member per hour (the phone posts one per blocked spam call).
+ * An SOS is never limited.
+ */
+export const EVENT_RATE_LIMIT = 120;
 
 const EventBody = z.object({
   type: z.enum(['spam_call', 'sos', 'scam_sms']),
@@ -39,7 +45,20 @@ function toEvent(r: EventRow) {
 export async function eventRoutes(app: FastifyInstance) {
   const { cfg, pool, notifier } = app.ctx;
 
-  app.post('/events', async (req, reply) => {
+  const eventLimit = {
+    config: {
+      rateLimit: {
+        max: EVENT_RATE_LIMIT,
+        timeWindow: '1 hour',
+        keyGenerator: userKey,
+        // After body parsing, so an SOS is never refused (and costs nothing).
+        hook: 'preHandler' as const,
+        allowList: (req: FastifyRequest) => (req.body as { type?: unknown } | undefined)?.type === 'sos',
+      },
+    },
+  };
+
+  app.post('/events', eventLimit, async (req, reply) => {
     const b = parse(EventBody, req.body);
     const phone = b.phone ? requirePhone(b.phone, cfg.defaultRegion) : null;
     const { rows } = await pool.query<EventRow>(

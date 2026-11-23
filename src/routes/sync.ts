@@ -1,9 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { badRequest, forbidden, notFound } from '../errors.js';
-import { parse, parseSince } from '../http.js';
+import { parse, parseSince, userKey } from '../http.js';
+import { format2Cursor } from '../pack-build.js';
 import { requirePhone } from '../phone.js';
+import { packDenial } from './pack2.js';
 import { UUID_RE } from '../users.js';
+
+/** POST /v1/blocks per member per hour (block rules are added one at a time, by hand). */
+export const BLOCK_RATE_LIMIT = 120;
 
 interface BlockRow {
   id: string;
@@ -38,8 +43,12 @@ const BlockBody = z.object({
 export async function syncRoutes(app: FastifyInstance) {
   const { cfg, pool } = app.ctx;
 
-  app.get<{ Querystring: { since?: string } }>('/sync', async (req) => {
+  app.get<{ Querystring: { since?: string; v?: string; members?: string } }>('/sync', async (req) => {
     const since = parseSince(req.query.since);
+    // ?v=2: what lookups on the phone need (spam details, packCursor, lookupMode); ?members=1:
+    // the family roster. Without them the answer is exactly what it was before.
+    const v2 = req.query.v === '2';
+    const withMembers = req.query.members === '1';
     // serverTime = start of the oldest open transaction, so rows committed by a
     // concurrent writer after we read are still >= the next `since`.
     const { rows: t } = await pool.query<{ t: Date }>(
@@ -53,7 +62,13 @@ export async function syncRoutes(app: FastifyInstance) {
     // Without: a snapshot of the live rows.
     const [spam, blocks] = await Promise.all([
       pool.query(
-        `SELECT phone, label, score, reports, top_category FROM spam_state
+        v2
+          ? // A change to the details alone (detail_updated_at) also sends the row.
+            `SELECT phone, label, score, reports, top_category, not_spam, last_comment, calls FROM spam_state
+             WHERE (($1::timestamptz IS NULL AND label <> 'none') OR greatest(updated_at, detail_updated_at) >= $1)
+               AND greatest(updated_at, detail_updated_at) < $2
+             ORDER BY phone`
+          : `SELECT phone, label, score, reports, top_category FROM spam_state
          WHERE (($1::timestamptz IS NULL AND label <> 'none') OR updated_at >= $1) AND updated_at < $2
          ORDER BY phone`,
         [since, serverTime],
@@ -67,7 +82,7 @@ export async function syncRoutes(app: FastifyInstance) {
       ),
     ]);
 
-    return {
+    const out = {
       serverTime: serverTime.toISOString(),
       spam: spam.rows.map((r) => ({
         phone: r.phone,
@@ -76,12 +91,30 @@ export async function syncRoutes(app: FastifyInstance) {
         reports: r.reports,
         topCategory: r.top_category,
         deleted: r.label === 'none',
+        ...(v2 ? { notSpam: r.not_spam, lastComment: r.last_comment, calls: r.calls } : {}),
       })),
       blocks: blocks.rows.map(toBlock),
     };
+    if (!v2 && !withMembers) return out;
+    const extra: Record<string, unknown> = {};
+    if (withMembers) {
+      const { rows } = await pool.query<{ id: string; phone: string; name: string; status: string | null; photo_url: string | null }>(
+        'SELECT id, phone, name, status, photo_url FROM users WHERE family_id = $1 ORDER BY created_at, id',
+        [req.user.family_id],
+      );
+      extra.members = rows.map((r) => ({ id: r.id, phone: r.phone, name: r.name, status: r.status, photoUrl: r.photo_url }));
+    }
+    if (v2) {
+      // The format-2 pack's cursor for this member (call GET /v1/pack/changes when it moved), and
+      // whether new apps answer caller ID from the pack (LOOKUP_MODE; online while format 2 is off).
+      const cursor = packDenial(cfg, req.user) ? null : await format2Cursor(pool, req.user.family_id);
+      extra.packCursor = cursor;
+      extra.lookupMode = cursor !== null ? cfg.lookupMode : 'online';
+    }
+    return { ...out, ...extra };
   });
 
-  app.post('/blocks', async (req, reply) => {
+  app.post('/blocks', { config: { rateLimit: { max: BLOCK_RATE_LIMIT, timeWindow: '1 hour', keyGenerator: userKey } } }, async (req, reply) => {
     // Each family has its own block list.
     const b = parse(BlockBody, req.body);
     let value: string;

@@ -52,12 +52,14 @@ export async function packRoutes(app: FastifyInstance) {
       // Starting over: asked to, behind purged tombstones or a new generation, or the member
       // changed family since their last download (the old family's entries must go).
       reset = since === 0 || since < meta.purgeSeq || req.user.pack_family_id !== family;
+      // Global live entries come from the last build (pack_meta.live_global); only this family's
+      // own entries are counted here. Before the first build that stores it, count them all.
       const { rows: q } = await c.query<{ used: number; live: number }>(
         `SELECT
            coalesce((SELECT rows FROM pack_usage WHERE user_id = $1 AND day = (now() AT TIME ZONE 'utc')::date), 0) AS used,
-           (SELECT count(*) FROM pack_entries
-            WHERE salt_id = $2 AND NOT deleted AND (scope IS NULL OR scope = $3)) AS live`,
-        [req.user.id, meta.saltId, family],
+           coalesce($4::bigint, (SELECT count(*) FROM pack_entries WHERE salt_id = $2 AND NOT deleted AND scope IS NULL))
+           + (SELECT count(*) FROM pack_entries WHERE salt_id = $2 AND NOT deleted AND scope = $3) AS live`,
+        [req.user.id, meta.saltId, family, meta.liveGlobal],
       );
       const left = Math.max(PACK_QUOTA_FLOOR, PACK_QUOTA_FACTOR * q[0].live) - q[0].used;
       if (left <= 0) throw new AppError(429, 'pack_quota', 'Daily name pack download limit reached; try again tomorrow');

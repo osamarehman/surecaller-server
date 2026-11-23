@@ -2,10 +2,10 @@ import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { z } from 'zod';
 import { lockCircle, withTx } from '../db.js';
-import { parse } from '../http.js';
-import { refreshSpamForUser } from '../lookup.js';
-import { emailTaken, EmailProof, proveEmail, spendEmailCode } from '../email.js';
-import { notFound } from '../errors.js';
+import { parse, userKey } from '../http.js';
+import { refreshSpamForUser, spamReporters } from '../lookup.js';
+import { emailTaken, EmailProof, proveIdentity, spendEmailCode, verifyGoogle } from '../email.js';
+import { AppError, conflict, notFound } from '../errors.js';
 import { assertKeepsAnAdmin, getUser, toMe } from '../users.js';
 import { packVault } from '../pack.js';
 
@@ -22,8 +22,13 @@ const PatchMe = z.object({
     .optional(),
   fcmToken: z.string().max(4096).nullable().optional(),
   // Adds or changes the account's email: a Google ID token, or email + a code from POST /v1/email-codes.
+  // A Google ID token also links the account to that Google account ("Confirm with Google").
   ...EmailProof,
 });
+
+const PhotoBody = z.object({ googleIdToken: z.string().min(1).max(4096) });
+/** PUT /v1/me/photo per member per hour (each one checks a Google token; people set a photo once). */
+export const PHOTO_RATE_LIMIT = 20;
 
 /**
  * Deletes a member with their contacts, reports, names and token, and refreshes
@@ -67,7 +72,9 @@ export async function meRoutes(app: FastifyInstance) {
 
   app.patch('/me', async (req) => {
     const b = parse(PatchMe, req.body);
-    const email = await proveEmail(app.ctx, b);
+    const proof = await proveIdentity(app.ctx, b);
+    const email = proof?.email ?? null;
+    const sub = proof?.sub ?? null; // set only for a Google proof
     await withTx(pool, async (c) => {
       const sets: string[] = [];
       const vals: unknown[] = [req.user.id];
@@ -79,7 +86,27 @@ export async function meRoutes(app: FastifyInstance) {
       if (b.status !== undefined) set('status', b.status || null);
       if (b.shareContacts !== undefined) set('share_contacts', b.shareContacts);
       if (b.fcmToken !== undefined) set('fcm_token', b.fcmToken || null);
+      let link = false;
+      if (sub) {
+        const { rows } = await c.query<{ google_sub: string | null }>(
+          'SELECT google_sub FROM users WHERE id = $1 FOR UPDATE',
+          [req.user.id],
+        );
+        const current = rows[0]?.google_sub ?? null;
+        if (current === null) link = true;
+        else if (current !== sub && cfg.signupProof === 'google') {
+          // One Google account per account: switching would free the old one for a second account.
+          throw conflict('google_account_set', 'This account is already confirmed with another Google account.');
+        }
+        // Linked to another Google account while SIGNUP_PROOF is not google: the email changes as
+        // before, the link stays.
+        if (link || current === sub) {
+          set('google_sub', sub);
+          sets.push('google_verified_at = now()');
+        }
+      }
       if (email) {
+        // An email code changes only the email; the Google link stays.
         set('email', email);
         await spendEmailCode(c, email);
       }
@@ -88,9 +115,26 @@ export async function meRoutes(app: FastifyInstance) {
         sets.push(`protection = protection || $${vals.length}::jsonb`);
       }
       if (sets.length) await c.query(`UPDATE users SET ${sets.join(', ')} WHERE id = $1`, vals);
+      // With SPAM_REPORTERS=google a newly linked account's reports start counting: relabel them.
+      if (link && spamReporters() === 'google') await refreshSpamForUser(c, req.user.id, cfg.spamThreshold);
       // Turning sharing off removes what was shared.
       if (b.shareContacts === false) await c.query('DELETE FROM contacts WHERE user_id = $1', [req.user.id]);
     }).catch(emailTaken);
+    return toMe((await getUser(pool, req.user.id))!);
+  });
+
+  // The member's photo is their Google profile picture and nothing else: the link comes out of a
+  // verified Google ID token, so a client can never point it at an image of its choosing.
+  app.put('/me/photo', { config: { rateLimit: { max: PHOTO_RATE_LIMIT, timeWindow: '1 hour', keyGenerator: userKey } } }, async (req) => {
+    const b = parse(PhotoBody, req.body);
+    const { picture } = await verifyGoogle(app.ctx, b.googleIdToken);
+    if (!picture) throw new AppError(422, 'no_photo', 'This Google account has no profile picture');
+    await pool.query('UPDATE users SET photo_url = $2 WHERE id = $1', [req.user.id, picture]);
+    return toMe((await getUser(pool, req.user.id))!);
+  });
+
+  app.delete('/me/photo', async (req) => {
+    await pool.query('UPDATE users SET photo_url = NULL WHERE id = $1', [req.user.id]);
     return toMe((await getUser(pool, req.user.id))!);
   });
 

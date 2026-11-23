@@ -4,10 +4,13 @@ import type { Client } from '../db.js';
 import { badRequest } from '../errors.js';
 import { parse, userKey } from '../http.js';
 import { buildLookups, spamLabel } from '../lookup.js';
+import { named } from './lookup.js';
 import { phonesInText } from '../phone.js';
 
 const URL_RE = /\b(?:https?:\/\/|www\.)[^\s<>"'`]+/gi;
 const MAX_ITEMS = 20;
+/** POST /v1/check per member per hour (the app sends a message the user pasted by hand). */
+export const CHECK_RATE_LIMIT = 120;
 
 /** Canonical form used as the url_reports key; null when it isn't a usable web URL. */
 export function normalizeUrl(raw: string): string | null {
@@ -49,13 +52,16 @@ const CheckBody = z.object({ text: z.string().max(20_000) });
 const UrlReportBody = z.object({ url: z.string().max(2000) });
 
 export async function checkRoutes(app: FastifyInstance) {
-  const { cfg, pool } = app.ctx;
+  const { cfg, pool, budget } = app.ctx;
   const threshold = cfg.spamThreshold;
 
-  app.post('/check', async (req) => {
+  // ?names=0: phones carry { phone, spam } only, outside the daily name budget (src/usage.ts).
+  app.post<{ Querystring: { names?: string } }>('/check', { config: { rateLimit: { max: CHECK_RATE_LIMIT, timeWindow: '1 hour', keyGenerator: userKey } } }, async (req, reply) => {
     const b = parse(CheckBody, req.body);
     const phoneList = phonesInText(b.text, cfg.defaultRegion).slice(0, MAX_ITEMS);
     const urlList = urlsInText(b.text).slice(0, MAX_ITEMS);
+    const noNames = req.query.names === '0';
+    if (!noNames && phoneList.length) await budget.check(req, reply);
     const [phones, urls] = await Promise.all([
       buildLookups(pool, phoneList, threshold, undefined, req.user.family_id),
       Promise.all(urlList.map((u) => urlInfo(pool, u, threshold))),
@@ -73,6 +79,8 @@ export async function checkRoutes(app: FastifyInstance) {
       verdict = 'safe';
     else verdict = 'unknown';
 
+    if (noNames) return { phones: phones.map((p) => ({ phone: p.phone, spam: p.spam })), urls, verdict };
+    await budget.charge(req, reply, named(phones));
     return { phones, urls, verdict };
   });
 

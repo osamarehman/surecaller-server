@@ -7,7 +7,8 @@ import { argon2id } from 'hash-wasm';
 
 interface Job {
   id: number;
-  phones: string[];
+  /** Numbers (format 1) or keyed passwords (format 2). */
+  phones: (string | Uint8Array)[];
   salt: Uint8Array;
   t: number;
   m: number;

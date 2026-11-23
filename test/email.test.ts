@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { api, createHarness, registerAdmin, type Harness } from './helpers.js';
+import { googlePhotoUrl, MAX_CODES_PER_EMAIL_DAY, MAX_FAILS_PER_EMAIL_DAY } from '../src/email.js';
+import { api, createHarness, fakePhoto, registerAdmin, type Harness } from './helpers.js';
 
 let h: Harness;
 beforeAll(async () => {
@@ -9,7 +10,7 @@ afterAll(async () => {
   await h.close();
 });
 beforeEach(async () => {
-  await h.pool.query('TRUNCATE families, users, invites, email_codes CASCADE');
+  await h.pool.query('TRUNCATE families, users, invites, email_codes, email_code_limits CASCADE');
   h.mails.length = 0;
 });
 
@@ -116,6 +117,41 @@ describe('email verification', () => {
     expect(late.status).toBe(403);
   });
 
+  it('caps codes sent and wrong tries per email per day, whatever the IP', async () => {
+    const email = 'cap@example.com';
+    const ask = (ip: string) =>
+      h.app.inject({ method: 'POST', url: '/v1/email-codes', remoteAddress: ip, payload: { email } });
+    const wait = () => h.pool.query("UPDATE email_codes SET sent_at = now() - interval '2 minutes'");
+    for (let i = 0; i < MAX_CODES_PER_EMAIL_DAY; i++) {
+      expect((await ask(`10.0.0.${i + 1}`)).statusCode).toBe(202);
+      await wait();
+    }
+    const over = await ask('10.0.1.1');
+    expect(over.statusCode).toBe(429);
+    expect(over.json().error).toBe('rate_limited');
+    // Another address is not affected.
+    expect((await api(h, 'POST', '/v1/email-codes', null, { email: 'other@example.com' })).status).toBe(202);
+
+    // Wrong tries: after MAX_FAILS_PER_EMAIL_DAY today, even the right code fails.
+    const good = lastCode();
+    const bad = good === '000000' ? '111111' : '000000';
+    const reg = (emailCode: string) =>
+      api(h, 'POST', '/v1/register', null, { phone: '+923001110030', name: 'O', email: 'other@example.com', emailCode });
+    await h.pool.query("UPDATE email_code_limits SET failed = $1 WHERE email = 'other@example.com'", [
+      MAX_FAILS_PER_EMAIL_DAY - 1,
+    ]);
+    expect((await reg(bad)).body.error).toBe('invalid_email_code');
+    const { rows } = await h.pool.query("SELECT failed FROM email_code_limits WHERE email = 'other@example.com'");
+    expect(rows[0].failed).toBe(MAX_FAILS_PER_EMAIL_DAY);
+    const late = await reg(good);
+    expect(late.status).toBe(403);
+    expect(late.body.error).toBe('invalid_email_code');
+
+    // Yesterday's counts don't count.
+    await h.pool.query("UPDATE email_code_limits SET day = day - 1 WHERE email = 'other@example.com'");
+    expect((await reg(good)).status).toBe(201);
+  });
+
   it('existing members add an email with PATCH /v1/me; others never see it', async () => {
     const admin = await registerAdmin(h).catch(() => null);
     expect(admin).toBeNull(); // ADMIN_CODE sign-up is a new account too, so it needs an email
@@ -173,6 +209,72 @@ describe('email verification', () => {
     const p = await api(h, 'PATCH', '/v1/me', viaCode.body.token, { googleIdToken: 'google:new@gmail.com' });
     expect(p.status).toBe(200);
     expect(p.body.email).toBe('new@gmail.com');
+  });
+
+  it('a Google account gives the member a photo, shown to every user who looks the number up', async () => {
+    const r = await api(h, 'POST', '/v1/register', null, {
+      phone: '+923001110020',
+      name: 'Pic',
+      googleIdToken: 'google:pic@gmail.com',
+    });
+    expect(r.body.user.photoUrl).toBe(fakePhoto('pic@gmail.com'));
+
+    // A user from another family sees the photo, but no member badge.
+    const other = await api(h, 'POST', '/v1/register', null, {
+      phone: '+923001110021',
+      name: 'Other',
+      googleIdToken: 'google:nopic@gmail.com',
+    });
+    expect(other.body.user.photoUrl).toBeNull();
+    const seen = await api(h, 'GET', '/v1/lookup/+923001110020', other.body.token);
+    expect(seen.body.photoUrl).toBe(fakePhoto('pic@gmail.com'));
+    expect(seen.body.member).toBeNull();
+    expect((await api(h, 'GET', '/v1/lookup/+923001110021', r.body.token)).body.photoUrl).toBeNull();
+
+    // Removing it: gone from the account and from lookups. Signing in again does not bring it back.
+    const gone = await api(h, 'DELETE', '/v1/me/photo', r.body.token);
+    expect(gone.status).toBe(200);
+    expect(gone.body.photoUrl).toBeNull();
+    expect((await api(h, 'GET', '/v1/lookup/+923001110020', other.body.token)).body.photoUrl).toBeNull();
+    const again = await api(h, 'POST', '/v1/register', null, { googleIdToken: 'google:pic@gmail.com' });
+    expect(again.body.user.photoUrl).toBeNull();
+
+    // Adding it takes a Google token; any Google account's picture will do, the email stays.
+    const put = await api(h, 'PUT', '/v1/me/photo', again.body.token, { googleIdToken: 'google:face@gmail.com' });
+    expect(put.status).toBe(200);
+    expect(put.body.photoUrl).toBe(fakePhoto('face@gmail.com'));
+    expect(put.body.email).toBe('pic@gmail.com');
+
+    expect((await api(h, 'PUT', '/v1/me/photo', again.body.token, { googleIdToken: 'forged' })).status).toBe(403);
+    const none = await api(h, 'PUT', '/v1/me/photo', again.body.token, { googleIdToken: 'google:nopic@gmail.com' });
+    expect(none.status).toBe(422);
+    expect(none.body.error).toBe('no_photo');
+    // A client can't hand the server a link of its own.
+    expect((await api(h, 'PUT', '/v1/me/photo', again.body.token, { photoUrl: 'https://evil.example/x.png' })).status).toBe(400);
+    expect((await api(h, 'PATCH', '/v1/me', again.body.token, { photoUrl: 'https://evil.example/x.png' })).body.photoUrl).toBe(
+      fakePhoto('face@gmail.com'),
+    );
+    expect((await api(h, 'PUT', '/v1/me/photo', null, { googleIdToken: 'google:face@gmail.com' })).status).toBe(401);
+  });
+
+  it('Google being unreachable is 503 google_unavailable, not a bad token', async () => {
+    const r = await api(h, 'POST', '/v1/register', null, { phone: '+923001110040', name: 'U', googleIdToken: 'unreachable' });
+    expect(r.status).toBe(503);
+    expect(r.body.error).toBe('google_unavailable');
+    const a = (await api(h, 'POST', '/v1/register', null, { phone: '+923001110041', name: 'U', googleIdToken: 'google:u@gmail.com' })).body;
+    expect((await api(h, 'PUT', '/v1/me/photo', a.token, { googleIdToken: 'unreachable' })).status).toBe(503);
+    expect((await api(h, 'PATCH', '/v1/me', a.token, { googleIdToken: 'unreachable' })).status).toBe(503);
+  });
+
+  it('only keeps Google-hosted https picture links', () => {
+    expect(googlePhotoUrl('https://lh3.googleusercontent.com/a/abc=s96-c')).toBe('https://lh3.googleusercontent.com/a/abc=s256-c');
+    expect(googlePhotoUrl('https://lh3.googleusercontent.com/a/abc')).toBe('https://lh3.googleusercontent.com/a/abc');
+    expect(googlePhotoUrl('http://lh3.googleusercontent.com/a/abc')).toBeNull();
+    expect(googlePhotoUrl('https://evil.example/googleusercontent.com/a')).toBeNull();
+    expect(googlePhotoUrl('https://googleusercontent.com.evil.example/a')).toBeNull();
+    expect(googlePhotoUrl('https://user@lh3.googleusercontent.com/a')).toBeNull();
+    expect(googlePhotoUrl('not a link')).toBeNull();
+    expect(googlePhotoUrl(undefined)).toBeNull();
   });
 
   it('signs in with email alone, on a phone with any SIM', async () => {

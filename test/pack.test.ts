@@ -287,6 +287,29 @@ describe('GET /v1/pack', () => {
     }
   });
 
+  it('takes the global part of the quota from the last build', async () => {
+    const stored = async () => (await h.pool.query<{ live_global: number }>('SELECT live_global FROM pack_meta')).rows[0].live_global;
+    const live = (
+      await h.pool.query<{ n: number }>('SELECT count(*)::int AS n FROM pack_entries WHERE scope IS NULL AND NOT deleted')
+    ).rows[0].n;
+    expect(await stored()).toBe(live);
+
+    // The request uses the stored count, not a recount: a bigger one raises the budget (5 x live).
+    const d = (await api(h, 'POST', '/v1/register', null, { phone: '+923003333334', name: 'D' })).body as Session;
+    await h.pool.query(
+      "INSERT INTO pack_usage (user_id, day, rows) VALUES ($1, (now() AT TIME ZONE 'utc')::date, 60000)",
+      [d.user.id],
+    );
+    expect((await get(d.token)).statusCode).toBe(429);
+    await h.pool.query('UPDATE pack_meta SET live_global = 20000');
+    expect((await get(d.token)).statusCode).toBe(200);
+    // Before the first build that stores it, the server counts.
+    await h.pool.query('UPDATE pack_meta SET live_global = NULL');
+    expect((await get(d.token)).statusCode).toBe(429);
+    await reconcilePack(h.pool);
+    expect(await stored()).toBe(live);
+  });
+
   it('keeps an opted-out member for their own family only', async () => {
     // Family B saves Abbu's number: a global answer.
     await api(h, 'PATCH', '/v1/me', b.token, { shareContacts: true });

@@ -40,6 +40,24 @@ services:
       db:
         condition: service_healthy
 
+  # Builds the offline name pack (with PACK_KEY) off the API process: drains the numbers the
+  # database queues on every change, plus a full safety pass nightly (src/pack-runner.ts). Same
+  # image and .env as the API; without PACK_KEY it idles. Without this service, set
+  # PACK_INLINE=true so the API builds the pack itself.
+  pack-worker:
+    build: .
+    restart: unless-stopped
+    command: ["node", "dist/pack-runner.js"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-surecaller}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-surecaller}
+    # The image's healthcheck asks the API's HTTP port, which this process doesn't open.
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+
   caddy:
     image: caddy:2
     profiles: ["https"]

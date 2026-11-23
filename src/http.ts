@@ -7,6 +7,7 @@ import type { Notifier } from './fcm.js';
 import type { GoogleVerifier } from './email.js';
 import type { Mailer } from './mail.js';
 import { hashToken } from './tokens.js';
+import { appBuild, type LookupBudget } from './usage.js';
 import type { UserRow } from './users.js';
 
 export interface Ctx {
@@ -15,6 +16,8 @@ export interface Ctx {
   notifier: Notifier;
   mailer: Mailer;
   google: GoogleVerifier | null;
+  /** LOOKUP_DAILY_LIMIT on names from the server (src/usage.ts). */
+  budget: LookupBudget;
 }
 
 declare module 'fastify' {
@@ -26,10 +29,68 @@ declare module 'fastify' {
   }
 }
 
-export function parse<T extends z.ZodTypeAny>(schema: T, data: unknown): z.infer<T> {
-  const r = schema.safeParse(data ?? {});
+/** zod 3's name for a value's type ("nan", "array", "null", ...), as its messages printed it. */
+function typeName(v: unknown): string {
+  if (typeof v === 'number') return Number.isNaN(v) ? 'nan' : 'number';
+  if (typeof v !== 'object') return typeof v;
+  if (v === null) return 'null';
+  if (Array.isArray(v)) return 'array';
+  if (v instanceof Date) return 'date';
+  return 'object';
+}
+
+const quoted = (values: readonly unknown[]) => values.map((v) => (typeof v === 'string' ? `'${v}'` : v)).join(' | ');
+
+/**
+ * zod 3's default English messages. The app shows the `invalid_request` message as is, so the
+ * text stays what zod 3 sent. Messages set on a schema (`.refine(.., 'area too long')`) win over this.
+ */
+function v3Message(issue: z.core.$ZodRawIssue): string | undefined {
+  const i = issue as z.core.$ZodRawIssue & Record<string, any>;
+  const exact = i.exact ? 'exactly' : undefined;
+  if ((i.code === 'invalid_type' || i.code === 'invalid_value') && i.input === undefined) return 'Required';
+  switch (i.code) {
+    case 'invalid_type':
+      // zod 4 rejects Infinity as a number; zod 3 failed it at .int() (the only coerced number has one).
+      if (i.expected === 'int' || (i.expected === 'number' && typeof i.input === 'number' && !Number.isNaN(i.input)))
+        return 'Expected integer, received float';
+      return `Expected ${i.expected === 'record' ? 'object' : i.expected}, received ${typeName(i.input)}`;
+    case 'invalid_value':
+      // zod 3 checked an enum's input is a string first.
+      if (typeof i.input !== 'string') return `Expected ${quoted(i.values)}, received ${typeName(i.input)}`;
+      return `Invalid enum value. Expected ${quoted(i.values)}, received '${i.input}'`;
+    case 'invalid_union':
+    case 'custom':
+      return 'Invalid input';
+    case 'invalid_format':
+      if (i.format === 'regex') return 'Invalid';
+      return `Invalid ${i.format === 'guid' ? 'uuid' : i.format}`;
+    case 'too_small':
+      if (i.origin === 'array') return `Array must contain ${exact ?? (i.inclusive ? 'at least' : 'more than')} ${i.minimum} element(s)`;
+      if (i.origin === 'string') return `String must contain ${exact ?? (i.inclusive ? 'at least' : 'over')} ${i.minimum} character(s)`;
+      if (i.origin === 'number' || i.origin === 'int') return `Number must be ${exact ? 'exactly equal to' : i.inclusive ? 'greater than or equal to' : 'greater than'} ${i.minimum}`;
+      return 'Invalid input';
+    case 'too_big':
+      if (i.origin === 'array') return `Array must contain ${exact ?? (i.inclusive ? 'at most' : 'less than')} ${i.maximum} element(s)`;
+      if (i.origin === 'string') return `String must contain ${exact ?? (i.inclusive ? 'at most' : 'under')} ${i.maximum} character(s)`;
+      if (i.origin === 'number' || i.origin === 'int') return `Number must be ${exact ?? (i.inclusive ? 'less than or equal to' : 'less than')} ${i.maximum}`;
+      return 'Invalid input';
+    default:
+      return undefined; // zod 4's own message
+  }
+}
+
+export function parse<T extends z.ZodType>(schema: T, data: unknown): z.infer<T> {
+  const r = schema.safeParse(data ?? {}, { error: v3Message });
   if (!r.success) {
-    const issue = r.error.issues[0];
+    // zod 4's .int() also rejects unsafe integers before .min()/.max() run; zod 3 reported the
+    // .min()/.max() issue at the same path, so skip the safe-range one when another follows it.
+    const { issues } = r.error;
+    const unsafeInt = (i: z.core.$ZodIssue) =>
+      (i.code === 'too_big' && i.maximum === Number.MAX_SAFE_INTEGER) ||
+      (i.code === 'too_small' && i.minimum === Number.MIN_SAFE_INTEGER);
+    const samePath = (a: z.core.$ZodIssue, b: z.core.$ZodIssue) => a.path.join('.') === b.path.join('.');
+    const issue = issues.find((i, n) => !(unsafeInt(i) && issues.slice(n + 1).some((j) => samePath(i, j)))) ?? issues[0];
     const where = issue.path.length ? `${issue.path.join('.')}: ` : '';
     throw badRequest('invalid_request', `${where}${issue.message}`);
   }
@@ -63,8 +124,15 @@ export async function authenticate(req: FastifyRequest): Promise<void> {
   req.user = user;
   const { pool } = req.server.ctx;
   const seen = user.last_seen_at;
-  if (!seen || Date.now() - seen.getTime() > 60_000) {
-    await pool.query('UPDATE users SET last_seen_at = now() WHERE id = $1', [user.id]);
+  // X-SureCaller-Build rides on the same throttled write; a new build is written at once.
+  const build = appBuild(req);
+  if (!seen || Date.now() - seen.getTime() > 60_000 || (build !== null && build !== user.app_build)) {
+    await pool.query(
+      `UPDATE users SET last_seen_at = now(), app_build = coalesce($2, app_build),
+         app_seen_at = CASE WHEN $2::int IS NULL THEN app_seen_at ELSE now() END
+       WHERE id = $1`,
+      [user.id, build],
+    );
   }
 }
 

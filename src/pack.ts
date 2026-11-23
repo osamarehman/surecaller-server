@@ -24,7 +24,8 @@ export interface PackParams {
 /** The production cost: about 20 ms per number on a desktop CPU. */
 export const DEFAULT_PARAMS = { t: 2, m: 16384, p: 1 } as const;
 
-export async function argon2(phone: string, prm: PackParams): Promise<Buffer> {
+/** password: the E.164 number (format 1) or v2Password (format 2). */
+export async function argon2(phone: string | Uint8Array, prm: PackParams): Promise<Buffer> {
   return Buffer.from(
     await argon2id({
       password: phone,
@@ -43,6 +44,31 @@ export function entryKeys(h: Buffer): { tag: Buffer; key: Buffer } {
   const mac = (msg: string) => crypto.createHmac('sha256', h).update(msg).digest();
   return { tag: mac('surecaller/pack/tag').subarray(0, 8), key: mac('surecaller/pack/key') };
 }
+
+/**
+ * Format 2 (keyed): the Argon2 password is HMAC-SHA256(packKey, "surecaller/pack/v2/pw" || phone)
+ * instead of the number, so nothing opens without the pack key (PACK_APP_KEYS).
+ */
+export function v2Password(packKey: Buffer, phone: string): Buffer {
+  return crypto.createHmac('sha256', packKey).update('surecaller/pack/v2/pw').update(phone, 'utf8').digest();
+}
+
+/** Format 2: tag = HMAC(h, "surecaller/pack/v2/tag")[0..8), key = HMAC(h, "surecaller/pack/v2/key"). */
+export function entryKeysV2(h: Buffer): { tag: Buffer; key: Buffer } {
+  const mac = (msg: string) => crypto.createHmac('sha256', h).update(msg).digest();
+  return { tag: mac('surecaller/pack/v2/tag').subarray(0, 8), key: mac('surecaller/pack/v2/key') };
+}
+
+/** A format-2 entry's part key: the tag's first two bytes, big-endian. */
+export const tag16Of = (tag: Buffer): number => (tag[0] << 8) | tag[1];
+
+/** A format-2 entry's share of its part digest: SHA-256(tag || blob)[0..8). */
+export const h8Of = (tag: Buffer, blob: Buffer): Buffer =>
+  crypto.createHash('sha256').update(tag).update(blob).digest().subarray(0, 8);
+
+/** HMAC(packKey, "surecaller/pack/app/check"), kept in pack_meta to catch a changed PACK_APP_KEYS value. */
+export const appKeyCheck = (packKey: Buffer): Buffer =>
+  crypto.createHmac('sha256', packKey).update('surecaller/pack/app/check').digest();
 
 /** blob = nonce(12) || AES-256-GCM(key, nonce, plaintext, aad = tag) || gcmTag(16). */
 export function sealEntry(key: Buffer, tag: Buffer, plaintext: string, nonce = crypto.randomBytes(12)): Buffer {
@@ -64,13 +90,17 @@ export function openEntry(key: Buffer, tag: Buffer, blob: Buffer): string | null
   }
 }
 
-/** The entry plaintext, keys in the documented order. */
+/**
+ * The entry plaintext, keys in the documented order. Format 2 adds `p` (photo URL) when there
+ * is one; there `n` and `s` may be null for an entry that carries only a photo.
+ */
 export interface PackAnswer {
-  n: string;
-  s: 'member' | 'contacts' | 'directory' | 'suggested';
+  n: string | null;
+  s: 'member' | 'contacts' | 'directory' | 'suggested' | null;
   c: string | null;
   k: number;
   m: boolean;
+  p?: string | null;
 }
 
 /**
@@ -78,7 +108,7 @@ export interface PackAnswer {
  * lengths don't give away name lengths. JSON parsers ignore the padding.
  */
 export function answerJson(a: PackAnswer): string {
-  const json = JSON.stringify({ n: a.n, s: a.s, c: a.c, k: a.k, m: a.m });
+  const json = JSON.stringify({ n: a.n, s: a.s, c: a.c, k: a.k, m: a.m, ...(a.p ? { p: a.p } : {}) });
   const pad = (32 - (Buffer.byteLength(json, 'utf8') % 32)) % 32;
   return json + ' '.repeat(pad);
 }
@@ -144,13 +174,6 @@ export function createPackVault(keyHex: string): PackVault {
 // Like vault(): one process-wide PACK_KEY, set by initPack before the app serves requests.
 let current: PackVault | null = null;
 
-let rebuild: () => void = () => {};
-/** server.ts registers the pack job here; routes call requestPackRebuild after new pack data. */
-export const setPackRebuilder = (fn: () => void) => {
-  rebuild = fn;
-};
-export const requestPackRebuild = () => rebuild();
-
 export function initPack(keyHex: string | null): PackVault | null {
   current = keyHex ? createPackVault(keyHex) : null;
   return current;
@@ -159,6 +182,25 @@ export function initPack(keyHex: string | null): PackVault | null {
 /** null when PACK_KEY is not set (the pack is off). */
 export function packVault(): PackVault | null {
   return current;
+}
+
+/** One pack key of PACK_APP_KEYS. */
+export interface AppKey {
+  id: number;
+  key: Buffer;
+}
+
+// Like `current`: the process-wide PACK_APP_KEYS, current first. Empty = format 2 off.
+let appKeyList: AppKey[] = [];
+
+export function initAppKeys(keys: readonly { id: number; hex: string }[]): AppKey[] {
+  appKeyList = keys.map((k) => ({ id: k.id, key: Buffer.from(k.hex, 'hex') }));
+  return appKeyList;
+}
+
+/** PACK_APP_KEYS, current first; empty when format 2 is off. */
+export function appKeys(): readonly AppKey[] {
+  return appKeyList;
 }
 
 /** sealPhone when the pack is on, else null (nothing written). */
@@ -178,7 +220,11 @@ export function defaultWorkers(): number {
  * Argon2id of many numbers, in input order, on `workers` threads. Small batches run inline:
  * a worker costs more to start than a few hashes.
  */
-export async function argon2Many(phones: string[], prm: PackParams, workers = defaultWorkers()): Promise<Buffer[]> {
+export async function argon2Many(
+  phones: (string | Uint8Array)[],
+  prm: PackParams,
+  workers = defaultWorkers(),
+): Promise<Buffer[]> {
   if (workers <= 0 || phones.length < 16) {
     const out: Buffer[] = [];
     for (const p of phones) out.push(await argon2(p, prm));
@@ -198,7 +244,9 @@ export async function argon2Many(phones: string[], prm: PackParams, workers = de
               if (next >= phones.length) return resolve();
               const start = next;
               next += CHUNK;
-              w.postMessage({ id: start, phones: phones.slice(start, start + CHUNK), salt: prm.salt, t: prm.t, m: prm.m, p: prm.p });
+              // A Buffer may be a view on a shared pool: send copies of just its bytes.
+              const chunk = phones.slice(start, start + CHUNK).map((x) => (typeof x === 'string' ? x : new Uint8Array(x)));
+              w.postMessage({ id: start, phones: chunk, salt: prm.salt, t: prm.t, m: prm.m, p: prm.p });
             };
             w.on('message', (msg: { id: number; hashes?: Uint8Array[]; error?: string }) => {
               if (msg.error || !msg.hashes) return reject(new Error(`argon2 worker: ${msg.error}`));

@@ -155,6 +155,29 @@ describe('config hardening', () => {
     expect(loadConfig({ adminCode: 'a'.repeat(12) }).adminCode).toBe('a'.repeat(12));
   });
 
+  it('validates SIGNUP_PROOF and SPAM_REPORTERS', () => {
+    const base = { adminCode: null, smtpUrl: null, googleClientIds: [] };
+    expect(loadConfig(base)).toMatchObject({ signupProof: 'none', spamReporters: 'all' });
+    expect(() => loadConfig({ ...base, signupProof: 'google' })).toThrow(/SIGNUP_PROOF=google needs GOOGLE_CLIENT_IDS/);
+    expect(loadConfig({ ...base, signupProof: 'google', googleClientIds: ['x'] }).signupProof).toBe('google');
+    expect(() => loadConfig({ ...base, signupProof: 'email' })).toThrow(/needs SMTP_URL or GOOGLE_CLIENT_IDS/);
+    // EMAIL_VERIFICATION=required is SIGNUP_PROOF=email; an explicit SIGNUP_PROOF wins.
+    expect(loadConfig({ ...base, emailRequired: true, smtpUrl: 'smtp://x' }).signupProof).toBe('email');
+    expect(
+      loadConfig({ ...base, emailRequired: true, signupProof: 'google', googleClientIds: ['x'] }).signupProof,
+    ).toBe('google');
+    expect(() => loadConfig({ ...base, signupProof: 'sms' as never })).toThrow(/SIGNUP_PROOF must be/);
+    expect(() => loadConfig({ ...base, spamReporters: 'admins' as never })).toThrow(/SPAM_REPORTERS must be/);
+    process.env.SIGNUP_PROOF = 'Google';
+    process.env.SPAM_REPORTERS = 'google';
+    try {
+      expect(loadConfig({ ...base, googleClientIds: ['x'] })).toMatchObject({ signupProof: 'google', spamReporters: 'google' });
+    } finally {
+      delete process.env.SIGNUP_PROOF;
+      delete process.env.SPAM_REPORTERS;
+    }
+  });
+
   it('ignores X-Forwarded-For by default', async () => {
     expect(loadConfig({ adminCode: null }).trustProxy).toBe(false);
     const limited = await createHarness({ registerRateLimit: 2 });
