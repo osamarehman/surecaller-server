@@ -1,5 +1,7 @@
 # SureCaller server
 
+**English** | [اردو](README.ur.md)
+
 The open source backend behind SureCaller, a caller ID and spam blocking app for Android.
 This is the code the official app's server runs.
 
